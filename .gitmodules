@@ -1,0 +1,3 @@
+[submodule "3rdparty/timesfm"]
+	path = 3rdparty/timesfm
+	url = https://github.com/google-research/timesfm.git
