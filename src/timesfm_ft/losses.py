@@ -100,7 +100,7 @@ class ForecastLoss(nn.Module):
         median_huber = _masked_mean(median_values, valid)
 
         # 分位数顺序错误
-        # 只比较相邻 quantile，单步成立整体成立
+        # 只比较相邻 quantile 即可，单步成立整体成立
         crossing_values = F.relu(
             prediction_ticks[:, :, :-1] - prediction_ticks[:, :, 1:]
         )
