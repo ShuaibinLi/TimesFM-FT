@@ -81,16 +81,17 @@ class ForecastLoss(nn.Module):
         prediction_ticks = (predictions - origin[:, :, None]) / self.tick_size
 
         # 9 个分位数的概率预测。
-        # 使用 Pinball loss 会让不同输出头学习不同条件分位数。而 mse 只能学习一个条件均值，是不够的。
+        # Pinball loss 让不同输出头学习不同条件分位数；
+        # MSE 只能学习一个条件均值，因此不足以训练分位数输出。
         errors = target_ticks[:, :, None] - prediction_ticks
         quantiles = self.quantiles_tensor.to(predictions.dtype)[None, None, :]
         pinball_values = torch.maximum(quantiles * errors, (quantiles - 1.0) * errors)
         pinball = _masked_mean(pinball_values, valid[:, :, None].expand_as(pinball_values))
 
-        # P50 点预测稳定性。主要是希望所有 quantile 都合理，P59 特别准确。
+        # P50 点预测稳定性。主要是希望所有 quantile 都合理，P50 特别准确。
         # 所以 Pinball 负责整体概率分布，Huber 对 P50 额外加权。
-        # Huber loss，误差小于 1 ticker 使用平方损失；误差大于 1 ticker 退化为线性损失
-        # 为什么加入 Huber。单独使用 Pinball 时，P50 基本是 MAE（梯度在零点不平滑，对小误差没有精细校正，优化可能抖动）
+        # Huber loss 在误差小于 1 tick 时使用平方损失，大于 1 tick 时退化为线性损失。
+        # 单独使用 Pinball 时，P50 基本是 MAE：零点不平滑，对小误差缺少精细校正。
         median_values = F.huber_loss(
             prediction_ticks[:, :, self.median_index],
             target_ticks,

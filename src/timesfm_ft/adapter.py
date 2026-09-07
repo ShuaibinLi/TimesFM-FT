@@ -10,7 +10,7 @@ from typing import Any, Literal
 import torch
 from torch import nn
 
-from timesfm_ft.config import ModelConfig
+from timesfm_ft.config import AdapterConfig, ModelConfig, OptimizerConfig
 
 
 class LoRALinear(nn.Module):
@@ -158,7 +158,8 @@ class TimesFM3Adapter(nn.Module):
     @classmethod
     def from_pretrained(
         cls,
-        config: ModelConfig,
+        model_config: ModelConfig,
+        adapter_config: AdapterConfig,
         *,
         device: torch.device,
         dtype: Literal["float32", "bfloat16"],
@@ -167,21 +168,21 @@ class TimesFM3Adapter(nn.Module):
 
         from timesfm3 import TimesFM3Torch
 
-        backbone = TimesFM3Torch.from_pretrained(config.checkpoint)
-        if config.disable_linear_detrending:
+        backbone = TimesFM3Torch.from_pretrained(model_config.checkpoint)
+        if model_config.disable_linear_detrending:
             backbone.use_linear_detrending = False
         trainable_names = configure_tuning(
             backbone,
-            mode=config.tuning_mode,
-            last_n_layers=config.last_n_layers,
-            lora_rank=config.lora_rank,
-            lora_alpha=config.lora_alpha,
-            lora_dropout=config.lora_dropout,
+            mode=adapter_config.type,
+            last_n_layers=adapter_config.last_n_layers,
+            lora_rank=adapter_config.rank,
+            lora_alpha=adapter_config.alpha,
+            lora_dropout=adapter_config.dropout,
         )
         adapter = cls(
             backbone,
-            checkpoint=config.checkpoint,
-            tuning_mode=config.tuning_mode,
+            checkpoint=model_config.checkpoint,
+            tuning_mode=adapter_config.type,
             trainable_names=trainable_names,
         )
         parameter_dtype = (
@@ -200,6 +201,48 @@ class TimesFM3Adapter(nn.Module):
             parameter.numel() for parameter in self.parameters() if parameter.requires_grad
         )
         return {"total": total, "trainable": trainable}
+
+    def optimizer_parameter_groups(
+        self,
+        config: OptimizerConfig,
+    ) -> list[dict[str, Any]]:
+        """Builds named LR groups for head, LoRA, and unfrozen backbone weights."""
+
+        grouped: dict[str, list[nn.Parameter]] = {
+            "head": [],
+            "adapter": [],
+            "pretrained": [],
+        }
+        for name, parameter in self.backbone.named_parameters():
+            if not parameter.requires_grad:
+                continue
+            if name.startswith("output_head."):
+                grouped["head"].append(parameter)
+            elif ".lora_a." in name or ".lora_b." in name:
+                grouped["adapter"].append(parameter)
+            else:
+                grouped["pretrained"].append(parameter)
+
+        learning_rates = {
+            "head": config.head_learning_rate,
+            "adapter": config.adapter_learning_rate,
+            "pretrained": config.pretrained_learning_rate,
+        }
+        parameter_groups: list[dict[str, Any]] = []
+        for name, parameters in grouped.items():
+            if not parameters:
+                continue
+            parameter_groups.append(
+                {
+                    "params": parameters,
+                    "lr": learning_rates[name],
+                    "weight_decay": 0.0 if name == "adapter" else config.weight_decay,
+                    "group_name": name,
+                }
+            )
+        if not parameter_groups:
+            raise RuntimeError("adapter produced no optimizer parameter groups")
+        return parameter_groups
 
     def forward(
         self,

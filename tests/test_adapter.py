@@ -9,6 +9,7 @@ from timesfm3 import (
 )
 
 from timesfm_ft.adapter import LoRALinear, TimesFM3Adapter, configure_tuning
+from timesfm_ft.config import OptimizerConfig
 from timesfm_ft.losses import ForecastLoss
 
 
@@ -135,3 +136,24 @@ def test_forecast_loss_is_zero_for_perfect_ordered_forecast():
         current_price=torch.tensor([99.99]),
     )
     torch.testing.assert_close(output.total, torch.tensor(0.0))
+
+
+def test_optimizer_groups_use_distinct_learning_rates():
+    backbone = make_tiny_model()
+    configure_tuning(
+        backbone,
+        mode="lora",
+        last_n_layers=1,
+        lora_rank=4,
+        lora_alpha=8.0,
+        lora_dropout=0.0,
+    )
+    adapter = TimesFM3Adapter(backbone)
+    config = OptimizerConfig(
+        adapter_learning_rate=1e-4,
+        head_learning_rate=3e-4,
+        pretrained_learning_rate=1e-5,
+    )
+    groups = adapter.optimizer_parameter_groups(config)
+    group_lrs = {group["group_name"]: group["lr"] for group in groups}
+    assert group_lrs == {"head": 3e-4, "adapter": 1e-4}

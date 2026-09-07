@@ -148,7 +148,7 @@ timesfm-ft --config configs/smoke_test_multi.json
 
 ## Train
 
-First update `loss.tick_size` in both configs to the instrument's actual tick
+First update `objective.tick_size` in both configs to the instrument's actual tick
 size.
 
 Single-input route:
@@ -167,7 +167,7 @@ Both routes use matched defaults so that only the input variates differ.
 
 ## Fine-tuning modes
 
-Set `model.tuning_mode` to:
+Set `adapter.type` to:
 
 - `head`: trains only the 1280-to-576 quantile output projection;
 - `lora`: trains the output head and low-rank updates in sequence attention,
@@ -178,6 +178,24 @@ Set `model.tuning_mode` to:
 
 Start with `head` as an integration check, then use `lora` for the first real
 experiment. Full fine-tuning should not be the default.
+
+## Optimizer and scheduler
+
+Optimizer and runtime settings are intentionally separate:
+
+```text
+optimizer.adapter_learning_rate    # LoRA matrices, default 1e-4
+optimizer.head_learning_rate       # quantile output head, default 3e-4
+optimizer.pretrained_learning_rate # partially/full-unfrozen weights, default 1e-5
+scheduler.warmup_ratio              # linear warmup fraction
+scheduler.min_lr_ratio              # final LR / initial group LR
+trainer.log_every_steps             # console logging interval
+```
+
+All active groups use AdamW. LoRA matrices have zero weight decay; the output
+head and unfrozen pretrained weights use `optimizer.weight_decay`. After
+warmup, every group follows the same cosine multiplier while preserving its
+own base LR.
 
 ## Objective
 
@@ -214,6 +232,18 @@ best/
 
 `adapter.pt` contains only parameters marked trainable by the selected tuning
 mode. For `full`, this is necessarily the complete model state.
+
+Console logs include:
+
+- run configuration, dataset sizes, device, dtype, and trainable parameter count;
+- parameter count, LR, and weight decay for every active optimizer group;
+- step-level total/pinball/Huber/crossing loss and current group LRs;
+- epoch-level train/validation components, gradient norm, elapsed time, and
+  samples per second;
+- best-checkpoint and run-completion events.
+
+`history.jsonl` stores the epoch metrics and current LR for machine-readable
+analysis.
 
 ## Verification
 

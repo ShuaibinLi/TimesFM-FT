@@ -8,30 +8,45 @@
   },
   "model": {
     "checkpoint": "google/timesfm-3.0-pytorch",
-    "tuning_mode": "head",
-    "last_n_layers": 1,
-    "lora_rank": 4,
-    "lora_alpha": 8.0,
-    "lora_dropout": 0.0,
     "disable_linear_detrending": false
   },
-  "loss": {
+  "adapter": {
+    "type": "head",
+    "last_n_layers": 1,
+    "rank": 4,
+    "alpha": 8.0,
+    "dropout": 0.0
+  },
+  "objective": {
     "tick_size": 0.01,
     "pinball_weight": 1.0,
     "median_huber_weight": 0.5,
     "crossing_weight": 0.05,
     "huber_delta_ticks": 1.0
   },
-  "train": {
+  "optimizer": {
+    "name": "adamw",
+    "adapter_learning_rate": 0.0001,
+    "head_learning_rate": 0.0003,
+    "pretrained_learning_rate": 0.00001,
+    "weight_decay": 0.01,
+    "beta1": 0.9,
+    "beta2": 0.999,
+    "eps": 1e-8
+  },
+  "scheduler": {
+    "name": "cosine",
+    "warmup_ratio": 0.0,
+    "min_lr_ratio": 0.1
+  },
+  "trainer": {
     "output_dir": "outputs/smoke-test-multi",
     "epochs": 1,
     "batch_size": 1,
-    "learning_rate": 0.0003,
-    "weight_decay": 0.01,
-    "warmup_ratio": 0.0,
     "max_grad_norm": 1.0,
     "num_workers": 0,
     "gradient_accumulation_steps": 1,
+    "log_every_steps": 1,
     "seed": 42,
     "device": "mps",
     "dtype": "float32"
