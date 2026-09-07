@@ -57,18 +57,25 @@ The upstream submodule is intentionally not modified.
 
 ## Setup
 
+Conda:
+
 ```bash
 git submodule update --init --recursive
-
-python -m venv .venv
-source .venv/bin/activate
-
-pip install -e './3rdparty/timesfm[torch]'
-pip install -e '.[dev]'
+conda env create -f environment.yml
+conda activate timesfm-ft
 ```
 
-For the full 330M checkpoint, use a CUDA GPU. CPU execution is intended only
-for unit tests with a reduced model.
+Equivalent virtualenv setup:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements-dev.txt
+```
+
+For the full 330M checkpoint, use CUDA for real training. Apple Silicon MPS can
+run the small head-only smoke test; CPU execution is intended primarily for
+unit tests with a reduced model.
 
 ## Data contract
 
@@ -120,6 +127,24 @@ data/multi/{train,val}.npz
 ```
 
 The synthetic values only test plumbing. They are not a forecasting benchmark.
+
+To reproduce the minimal data used by the full-checkpoint smoke test:
+
+```bash
+python scripts/make_synthetic_data.py \
+  --output-root data/dummy \
+  --num-samples 4 \
+  --context-length 32 \
+  --horizon-length 16 \
+  --num-variates 8
+```
+
+Then run one head-only epoch for each input route:
+
+```bash
+timesfm-ft --config configs/smoke_test.json
+timesfm-ft --config configs/smoke_test_multi.json
+```
 
 ## Train
 
