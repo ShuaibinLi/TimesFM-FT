@@ -1,3 +1,18 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.venv/
+dist/
+build/
+
+data/
+outputs/
+checkpoints/
+*.pt
+*.pth
+*.safetensors
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

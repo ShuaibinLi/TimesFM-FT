@@ -1,0 +1,39 @@
+{
+  "data": {
+    "train_path": "data/single/train.npz",
+    "val_path": "data/single/val.npz",
+    "context_length": 512,
+    "horizon_length": 60,
+    "max_variates": 1
+  },
+  "model": {
+    "checkpoint": "google/timesfm-3.0-pytorch",
+    "tuning_mode": "lora",
+    "last_n_layers": 4,
+    "lora_rank": 8,
+    "lora_alpha": 16.0,
+    "lora_dropout": 0.05,
+    "disable_linear_detrending": false
+  },
+  "loss": {
+    "tick_size": 0.01,
+    "pinball_weight": 1.0,
+    "median_huber_weight": 0.5,
+    "crossing_weight": 0.05,
+    "huber_delta_ticks": 1.0
+  },
+  "train": {
+    "output_dir": "outputs/single-input",
+    "epochs": 10,
+    "batch_size": 16,
+    "learning_rate": 0.0001,
+    "weight_decay": 0.01,
+    "warmup_ratio": 0.05,
+    "max_grad_norm": 1.0,
+    "num_workers": 4,
+    "gradient_accumulation_steps": 4,
+    "seed": 42,
+    "device": "auto",
+    "dtype": "bfloat16"
+  }
+}

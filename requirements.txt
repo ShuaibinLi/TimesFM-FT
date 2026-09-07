@@ -1,0 +1,5 @@
+# Official TimesFM 3 implementation pinned by this repository's submodule.
+-e ./3rdparty/timesfm[torch]
+
+# Fine-tuning toolkit and its runtime dependencies from pyproject.toml.
+-e .
