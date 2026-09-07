@@ -19,6 +19,7 @@ dev = [
 
 [project.scripts]
 timesfm-ft = "timesfm_ft.cli:main"
+timesfm-eval = "timesfm_ft.eval_cli:main"
 
 [build-system]
 requires = ["setuptools>=69"]

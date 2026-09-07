@@ -15,6 +15,7 @@ class DataConfig:
     context_length: int = 512
     horizon_length: int = 60
     max_variates: int = 32
+    sampling_interval_seconds: float = 0.5
 
 
 @dataclasses.dataclass(frozen=True)
@@ -106,6 +107,8 @@ class ExperimentConfig:
             raise ValueError("context_length must be positive")
         if self.data.horizon_length <= 0:
             raise ValueError("horizon_length must be positive")
+        if self.data.sampling_interval_seconds <= 0:
+            raise ValueError("sampling_interval_seconds must be positive")
         if self.data.max_variates < 1 or self.data.max_variates > 32:
             raise ValueError("max_variates must be in [1, 32]")
         if self.objective.tick_size <= 0:

@@ -65,6 +65,9 @@ def test_differentiable_decode_matches_official_decode_and_backpropagates():
     wrapped = TimesFM3Adapter(backbone)
     actual = wrapped(context, horizon=6, context_mask=mask)
     torch.testing.assert_close(actual, expected)
+    inference = wrapped.predict(context, horizon=6, context_mask=mask)
+    torch.testing.assert_close(inference, expected)
+    assert not inference.requires_grad
 
     actual.sum().backward()
     assert backbone.output_head.weight.grad is not None

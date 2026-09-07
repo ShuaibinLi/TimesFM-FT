@@ -4,6 +4,7 @@
     "val_path": "data/multi/val.npz",
     "context_length": 512,
     "horizon_length": 60,
+    "sampling_interval_seconds": 0.5,
     "max_variates": 32
   },
   "model": {

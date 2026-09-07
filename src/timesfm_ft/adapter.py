@@ -257,6 +257,39 @@ class TimesFM3Adapter(nn.Module):
         passed to the official model as past-only covariates.
         """
 
+        decode_kwargs = self._prepare_decode_inputs(
+            context_values,
+            horizon=horizon,
+            context_mask=context_mask,
+        )
+        all_quantiles = self._decode_impl(self.backbone, **decode_kwargs)
+        return all_quantiles[:, 0, :horizon, :]
+
+    @torch.inference_mode()
+    def predict(
+        self,
+        context_values: torch.Tensor,
+        *,
+        horizon: int,
+        context_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Runs inference through the official ``TimesFM3Torch.decode`` method."""
+
+        decode_kwargs = self._prepare_decode_inputs(
+            context_values,
+            horizon=horizon,
+            context_mask=context_mask,
+        )
+        all_quantiles = self.backbone.decode(**decode_kwargs)
+        return all_quantiles[:, 0, :horizon, :]
+
+    @staticmethod
+    def _prepare_decode_inputs(
+        context_values: torch.Tensor,
+        *,
+        horizon: int,
+        context_mask: torch.Tensor | None,
+    ) -> dict[str, Any]:
         if context_values.ndim != 3:
             raise ValueError("context_values must have shape (batch, variates, context)")
         if context_values.shape[1] > 32:
@@ -274,16 +307,13 @@ class TimesFM3Adapter(nn.Module):
             if context_mask is not None and context_values.shape[1] > 1
             else None
         )
-
-        all_quantiles = self._decode_impl(
-            self.backbone,
-            target=target,
-            horizon=horizon,
-            past_only_covariates=covariates,
-            target_mask=target_mask,
-            past_only_mask=covariate_mask,
-        )
-        return all_quantiles[:, 0, :horizon, :]
+        return {
+            "target": target,
+            "horizon": horizon,
+            "past_only_covariates": covariates,
+            "target_mask": target_mask,
+            "past_only_mask": covariate_mask,
+        }
 
     def trainable_state_dict(self) -> dict[str, torch.Tensor]:
         trainable = {

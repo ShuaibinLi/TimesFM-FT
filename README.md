@@ -48,6 +48,7 @@ TimesFM-FT/
 │   ├── data.py
 │   ├── losses.py
 │   ├── adapter.py            # all TimesFM-specific loading and adaptation
+│   ├── evaluator.py          # official decode + streaming forecast metrics
 │   ├── trainer.py
 │   └── cli.py
 └── tests/
@@ -164,6 +165,48 @@ timesfm-ft --config configs/multi_input.json
 ```
 
 Both routes use matched defaults so that only the input variates differ.
+
+## Inference and evaluation
+
+Fine-tuned evaluation reconstructs the official backbone and matching adapter
+structure, loads `adapter.pt`, and then calls the official
+`TimesFM3Torch.decode()` method. The differentiable decode bypass is used only
+during training.
+
+Evaluate a fine-tuned adapter:
+
+```bash
+timesfm-eval \
+  --config outputs/single-input/experiment_config.json \
+  --adapter outputs/single-input/best/adapter.pt
+```
+
+Run the same dataset with the untouched official checkpoint:
+
+```bash
+timesfm-eval --config configs/single_input.json
+```
+
+Optional arguments:
+
+```text
+--data PATH        override data.val_path
+--output-dir PATH  override the metric directory
+--batch-size N     override trainer.batch_size
+--device DEVICE    override trainer.device
+```
+
+Evaluation writes:
+
+```text
+evaluation/
+├── summary.json       # overall point, baseline, and probabilistic metrics
+└── per_horizon.csv    # metrics from 0.5s through 30s
+```
+
+Reported metrics include P50 MAE/RMSE in ticks, persistence RMSE, out-of-sample
+R² versus persistence, mean pinball loss, quantile coverage and calibration
+error, quantile crossing rate, and per-horizon breakdowns.
 
 ## Fine-tuning modes
 
