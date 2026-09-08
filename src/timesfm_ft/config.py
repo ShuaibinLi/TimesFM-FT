@@ -12,6 +12,7 @@ from typing import Any, Literal
 class DataConfig:
     train_path: str
     val_path: str
+    test_path: str | None = None
     context_length: int = 256
     horizon_length: int = 64
     max_variates: int = 32

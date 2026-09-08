@@ -114,6 +114,30 @@ Conventions:
 Both supplied datasets must share exactly the same timestamps and
 `future_values` before A/B model comparisons are accepted.
 
+### ZN/ES chronological splits
+
+The checked-in single-product configs use the canonical non-overlapping date
+lists under `configs/splits/`:
+
+- train: 445 days, 2022-11-01 through 2024-09-30;
+- validation: 189 days, 2024-10-01 through 2025-07-31;
+- test: 120 days, 2025-08-01 through 2026-01-30.
+
+All observations are exactly 500 ms apart. Production windows use 256 context
+points (128 seconds), 64 future points (32 seconds), and a 64-point stride.
+Build both products' day-safe NPZ files without crossing session boundaries:
+
+```bash
+python scripts/prepare_single_product_splits.py
+```
+
+Train the two single-variable models independently:
+
+```bash
+timesfm-ft --config configs/zn_single_input.json
+timesfm-ft --config configs/es_single_input.json
+```
+
 ## Contract smoke test
 
 Generate small aligned single/multi datasets:

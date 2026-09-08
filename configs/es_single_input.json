@@ -1,0 +1,56 @@
+{
+  "data": {
+    "train_path": "data/es-wmp-500ms/splits/train_c256_h64.npz",
+    "val_path": "data/es-wmp-500ms/splits/val_c256_h64.npz",
+    "test_path": "data/es-wmp-500ms/splits/test_c256_h64.npz",
+    "context_length": 256,
+    "horizon_length": 64,
+    "sampling_interval_seconds": 0.5,
+    "max_variates": 1
+  },
+  "model": {
+    "checkpoint": "google/timesfm-3.0-pytorch",
+    "disable_linear_detrending": false
+  },
+  "adapter": {
+    "type": "lora",
+    "last_n_layers": 4,
+    "rank": 8,
+    "alpha": 16.0,
+    "dropout": 0.05
+  },
+  "objective": {
+    "tick_size": 0.25,
+    "pinball_weight": 1.0,
+    "median_huber_weight": 0.5,
+    "crossing_weight": 0.05,
+    "huber_delta_ticks": 1.0
+  },
+  "optimizer": {
+    "name": "adamw",
+    "adapter_learning_rate": 0.0001,
+    "head_learning_rate": 0.0003,
+    "pretrained_learning_rate": 0.00001,
+    "weight_decay": 0.01,
+    "beta1": 0.9,
+    "beta2": 0.999,
+    "eps": 1e-8
+  },
+  "scheduler": {
+    "name": "cosine",
+    "warmup_ratio": 0.05,
+    "min_lr_ratio": 0.1
+  },
+  "trainer": {
+    "output_dir": "outputs/es-single-input-c256-h64",
+    "epochs": 10,
+    "batch_size": 16,
+    "max_grad_norm": 1.0,
+    "num_workers": 4,
+    "gradient_accumulation_steps": 4,
+    "log_every_steps": 10,
+    "seed": 42,
+    "device": "auto",
+    "dtype": "bfloat16"
+  }
+}
