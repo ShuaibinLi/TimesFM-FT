@@ -274,26 +274,90 @@ def _plot_daily(rows: list[dict[str, object]], destination: Path) -> None:
     plt.close(figure)
 
 
+def _plot_quantile_fan(
+    axis: plt.Axes,
+    x_values: np.ndarray,
+    predictions: np.ndarray,
+    quantiles: np.ndarray,
+    *,
+    horizon_seconds: float,
+) -> None:
+    median_index = int(np.argmin(np.abs(quantiles - 0.5)))
+    for lower_index in range(median_index):
+        upper_index = len(quantiles) - lower_index - 1
+        axis.fill_between(
+            x_values,
+            predictions[:, lower_index],
+            predictions[:, upper_index],
+            color="tab:orange",
+            alpha=0.07 + lower_index * 0.04,
+            label="P10–P90 prediction region" if lower_index == 0 else None,
+            linewidth=0,
+        )
+    for quantile_index in range(len(quantiles)):
+        if quantile_index == median_index:
+            continue
+        axis.plot(
+            x_values,
+            predictions[:, quantile_index],
+            color="tab:orange",
+            alpha=0.35,
+            linewidth=0.55,
+        )
+    axis.plot(
+        x_values,
+        predictions[:, median_index],
+        color="tab:orange",
+        label=f"TimesFM P50 point forecast ({horizon_seconds:g}s)",
+        linewidth=2.0,
+        zorder=5,
+    )
+
+
 def _plot_example(
     context: np.ndarray,
     target: np.ndarray,
-    prediction: np.ndarray,
+    predictions: np.ndarray,
+    quantiles: np.ndarray,
     destination: Path,
     *,
     interval_seconds: float,
+    tick_size: float,
 ) -> None:
     shown_context = min(240, len(context))
     context_x = np.arange(-shown_context + 1, 1) * interval_seconds
     future_x = np.arange(1, len(target) + 1) * interval_seconds
+    origin = context[-1]
+    context_ticks = (context - origin) / tick_size
+    target_ticks = (target - origin) / tick_size
+    prediction_ticks = (predictions - origin) / tick_size
     figure, axis = plt.subplots(figsize=(12, 5))
-    axis.plot(context_x, context[-shown_context:], label="Observed WMP")
-    axis.plot(future_x, target, label="Actual future WMP")
-    axis.plot(future_x, prediction, label="TimesFM P50 forecast")
+    axis.plot(
+        context_x,
+        context_ticks[-shown_context:],
+        label="Observed context WMP",
+        linewidth=1.4,
+    )
+    _plot_quantile_fan(
+        axis,
+        future_x,
+        prediction_ticks,
+        quantiles,
+        horizon_seconds=len(target) * interval_seconds,
+    )
+    axis.plot(
+        future_x,
+        target_ticks,
+        label="Actual future WMP",
+        color="black",
+        linewidth=2.0,
+        zorder=6,
+    )
     axis.axvline(0.0, color="black", linewidth=0.8)
     axis.set(
         title="Representative ZN WMP forecast",
         xlabel="Seconds from forecast cutoff",
-        ylabel="Weighted-mid price",
+        ylabel="WMP displacement from cutoff (ZN ticks)",
     )
     axis.legend()
     figure.tight_layout()
@@ -304,12 +368,14 @@ def _plot_example(
 def _plot_daily_price_curves(
     dataset: NpzWindowDataset,
     predictions: np.ndarray,
+    quantiles: np.ndarray,
     targets: np.ndarray,
     dates: np.ndarray,
     timestamps: np.ndarray,
     destination: Path,
     *,
     interval_seconds: float,
+    tick_size: float,
 ) -> None:
     destination.mkdir(parents=True, exist_ok=True)
     interval_ns = int(interval_seconds * 1_000_000_000)
@@ -321,8 +387,14 @@ def _plot_daily_price_curves(
         selected = np.flatnonzero(dates == day)
         time_formatter = mdates.DateFormatter("%H:%M", tz=eastern)
 
-        figure = plt.figure(figsize=(20, 22), constrained_layout=True)
-        grid = figure.add_gridspec(5, 4)
+        figure = plt.figure(figsize=(20, 23), constrained_layout=True)
+        grid = figure.add_gridspec(
+            6,
+            4,
+            height_ratios=[0.16, 1.0, 1.0, 1.0, 1.0, 1.0],
+        )
+        legend_axis = figure.add_subplot(grid[0, :])
+        legend_axis.axis("off")
         detail_positions = np.linspace(
             0,
             len(selected) - 1,
@@ -340,25 +412,32 @@ def _plot_daily_price_curves(
             ) * interval_ns
             context_x = mdates.date2num(context_times.astype("datetime64[ns]"))
             future_x = mdates.date2num(future_times.astype("datetime64[ns]"))
-            axis = figure.add_subplot(grid[panel // 4, panel % 4])
+            context_values = dataset.context_values[sample_index, 0]
+            origin = context_values[-1]
+            context_ticks = (context_values - origin) / tick_size
+            target_ticks = (targets[sample_index] - origin) / tick_size
+            prediction_ticks = (predictions[sample_index] - origin) / tick_size
+            axis = figure.add_subplot(grid[1 + panel // 4, panel % 4])
             axis.plot(
                 context_x,
-                dataset.context_values[sample_index, 0],
+                context_ticks,
                 label=f"Context ({context_length * interval_seconds:g}s)",
-                linewidth=1.0,
+                linewidth=1.3,
+            )
+            _plot_quantile_fan(
+                axis,
+                future_x,
+                prediction_ticks,
+                quantiles,
+                horizon_seconds=horizon * interval_seconds,
             )
             axis.plot(
                 future_x,
-                targets[sample_index],
+                target_ticks,
                 label=f"Actual future ({horizon * interval_seconds:g}s)",
                 color="black",
-                linewidth=1.0,
-            )
-            axis.plot(
-                future_x,
-                predictions[sample_index],
-                label=f"TimesFM P50 ({horizon * interval_seconds:g}s)",
-                linewidth=1.0,
+                linewidth=2.0,
+                zorder=6,
             )
             axis.axvline(
                 mdates.date2num(np.datetime64(cutoff, "ns")),
@@ -371,29 +450,32 @@ def _plot_daily_price_curves(
             )
             axis.set_title(f"Forecast cutoff {cutoff_label}", fontsize=10)
             axis.xaxis.set_major_formatter(time_formatter)
-            axis.yaxis.set_major_formatter(mticker.FormatStrFormatter("%.4f"))
+            axis.yaxis.set_major_formatter(mticker.FormatStrFormatter("%.2f"))
             axis.tick_params(axis="x", labelsize=8)
             axis.tick_params(axis="y", labelsize=8)
             axis.grid(alpha=0.2)
             if panel % 4 == 0:
-                axis.set_ylabel("WMP")
+                axis.set_ylabel("Δ WMP (ticks)")
             if panel >= 16:
                 axis.set_xlabel("Actual market time (ET)")
 
-        handles, labels = figure.axes[0].get_legend_handles_labels()
-        figure.legend(
+        handles, labels = figure.axes[1].get_legend_handles_labels()
+        legend_axis.legend(
             handles,
             labels,
-            loc="lower center",
-            ncol=3,
-            bbox_to_anchor=(0.5, -0.01),
+            loc="center",
+            ncol=4,
         )
         figure.suptitle(
-            f"ZN absolute WMP zero-shot · {int(day)} · "
+            f"ZN WMP displacement from each cutoff · {int(day)} · "
             f"20 representative windows of {len(selected)}",
             fontsize=16,
         )
-        figure.savefig(destination / f"{int(day)}.png", dpi=160)
+        figure.savefig(
+            destination / f"{int(day)}.png",
+            dpi=160,
+            bbox_inches="tight",
+        )
         plt.close(figure)
 
 
@@ -445,8 +527,9 @@ def evaluate(
         tick_size=config.objective.tick_size,
         sampling_interval_seconds=config.data.sampling_interval_seconds,
     )
-    median_index = int(np.argmin(np.abs(np.asarray(model.quantiles) - 0.5)))
-    median_predictions: list[np.ndarray] = []
+    quantile_values = np.asarray(model.quantiles, dtype=np.float32)
+    median_index = int(np.argmin(np.abs(quantile_values - 0.5)))
+    quantile_predictions: list[np.ndarray] = []
     targets: list[np.ndarray] = []
     origins: list[np.ndarray] = []
     started = time.perf_counter()
@@ -463,7 +546,7 @@ def evaluate(
         )
         origin = context[:, 0, -1]
         accumulator.update(prediction, future, origin, future_mask)
-        median_predictions.append(prediction[:, :, median_index].float().cpu().numpy())
+        quantile_predictions.append(prediction.float().cpu().numpy())
         targets.append(future.float().cpu().numpy())
         origins.append(origin.float().cpu().numpy())
         if step % 25 == 0 or step == len(loader):
@@ -472,7 +555,8 @@ def evaluate(
     if device.type == "cuda":
         torch.cuda.synchronize()
     elapsed = time.perf_counter() - started
-    prediction_array = np.concatenate(median_predictions)
+    quantile_prediction_array = np.concatenate(quantile_predictions)
+    prediction_array = quantile_prediction_array[:, :, median_index]
     target_array = np.concatenate(targets)
     origin_array = np.concatenate(origins)
     summary, probabilistic_rows = accumulator.results()
@@ -530,6 +614,8 @@ def evaluate(
         origins=origin_array,
         actual=target_array,
         prediction_p50=prediction_array,
+        prediction_quantiles=quantile_prediction_array,
+        quantiles=quantile_values,
     )
     _plot_horizons(horizon_rows, output_dir / "horizon_metrics.png")
     _plot_daily(daily_rows, output_dir / "daily_metrics.png")
@@ -538,19 +624,23 @@ def evaluate(
     _plot_example(
         dataset.context_values[source_index, 0],
         target_array[example],
-        prediction_array[example],
+        quantile_prediction_array[example],
+        quantile_values,
         output_dir / "forecast_example.png",
         interval_seconds=config.data.sampling_interval_seconds,
+        tick_size=config.objective.tick_size,
     )
     if max_samples is None:
         _plot_daily_price_curves(
             dataset,
-            prediction_array,
+            quantile_prediction_array,
+            quantile_values,
             target_array,
             dates,
             timestamps,
             output_dir / "daily_price_curves",
             interval_seconds=config.data.sampling_interval_seconds,
+            tick_size=config.objective.tick_size,
         )
     LOGGER.info(
         "complete samples=%d elapsed=%.1fs mae_ticks=%.4f endpoint_direction=%.4f output=%s",
