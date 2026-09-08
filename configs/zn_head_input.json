@@ -1,13 +1,18 @@
 {
   "data": {
-    "train_path": "../data/multi/train.npz",
-    "val_path": "../data/multi/val.npz",
-    "test_path": "../data/multi/test.npz",
+    "train_path": "../data/zn-wmp-500ms/splits/train_c256_h64",
+    "val_path": "../data/zn-wmp-500ms/splits/val_c256_h64",
+    "test_path": "../data/zn-wmp-500ms/splits/test_c256_h64",
+    "product": "ZN",
     "context_length": 256,
     "horizon_length": 64,
     "stride": 64,
     "sampling_interval_seconds": 0.5,
-    "max_variates": 32
+    "max_variates": 1,
+    "train_dates_path": "splits/dates-train.txt",
+    "val_dates_path": "splits/dates-val.txt",
+    "test_dates_path": "splits/dates-test.txt",
+    "require_metadata": true
   },
   "model": {
     "checkpoint": "google/timesfm-3.0-pytorch",
@@ -15,14 +20,14 @@
     "disable_iterative_cpm_revin": true
   },
   "adapter": {
-    "type": "lora",
-    "last_n_layers": 4,
-    "rank": 8,
-    "alpha": 16.0,
-    "dropout": 0.05
+    "type": "head",
+    "last_n_layers": 1,
+    "rank": 1,
+    "alpha": 1.0,
+    "dropout": 0.0
   },
   "objective": {
-    "tick_size": 0.01,
+    "tick_size": 0.015625,
     "pinball_weight": 1.0,
     "median_huber_weight": 0.5,
     "crossing_weight": 0.05,
@@ -44,7 +49,7 @@
     "min_lr_ratio": 0.1
   },
   "trainer": {
-    "output_dir": "../outputs/multi-input",
+    "output_dir": "../outputs/zn-head-input-c256-h64",
     "epochs": 5,
     "batch_size": 32,
     "max_grad_norm": 1.0,

@@ -127,6 +127,7 @@ def _run_epoch(
     sample_count = 0
     gradient_norm_total = 0.0
     optimizer_updates = 0
+    latest_gradient_norm: float | None = None
     started_at = time.perf_counter()
     if training:
         optimizer.zero_grad(set_to_none=True)
@@ -144,6 +145,7 @@ def _run_epoch(
     grad_context = torch.enable_grad if training else torch.no_grad
     with grad_context():
         for step, raw_batch in enumerate(loader):
+            latest_gradient_norm = None
             valid_points = int((~raw_batch["future_mask"]).sum().item())
             batch = _move_batch(raw_batch, device)
             batch_size = batch["context_values"].shape[0]
@@ -201,6 +203,7 @@ def _run_epoch(
                             f"step={step + 1}; bad_gradients={bad_gradients[:10]}"
                         )
                     gradient_norm_total += float(gradient_norm.detach())
+                    latest_gradient_norm = float(gradient_norm.detach())
                     optimizer_updates += 1
                     optimizer.step()
                     optimizer.zero_grad(set_to_none=True)
@@ -240,16 +243,24 @@ def _run_epoch(
                     for name, value in _learning_rates(optimizer).items()
                 )
                 LOGGER.info(
-                    "%s epoch=%d step=%d/%d loss=%.6f pinball=%.6f "
-                    "huber=%.6f crossing=%.6f %s",
+                    "%s epoch=%d step=%d/%d batch_loss=%.6f "
+                    "running_loss=%.6f pinball=%.6f huber=%.6f crossing=%.6f "
+                    "optimizer_updates=%d gradient_norm=%s %s",
                     split,
                     epoch,
                     step + 1,
                     len(loader),
+                    float(losses.total.detach()),
                     running["loss"],
                     running["pinball"],
                     running["huber"],
                     running["crossing"],
+                    optimizer_updates,
+                    (
+                        f"{latest_gradient_norm:.6f}"
+                        if latest_gradient_norm is not None
+                        else "pending"
+                    ),
                     lr_text,
                 )
 
@@ -361,8 +372,9 @@ def _load_training_state(
             raise ValueError(f"resume config mismatch in section {section}")
     saved_trainer = dict(saved_config.get("trainer", {}))
     current_trainer = dict(current_config.get("trainer", {}))
-    saved_trainer.pop("resume_from", None)
-    current_trainer.pop("resume_from", None)
+    for non_semantic_key in ("resume_from", "log_every_steps"):
+        saved_trainer.pop(non_semantic_key, None)
+        current_trainer.pop(non_semantic_key, None)
     if saved_trainer != current_trainer:
         raise ValueError("resume config mismatch in section trainer")
     if state.get("data_metadata") != data_metadata:

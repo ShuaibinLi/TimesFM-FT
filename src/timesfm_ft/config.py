@@ -40,6 +40,9 @@ class AdapterConfig:
     rank: int = 8
     alpha: float = 16.0
     dropout: float = 0.05
+    lora_sequence_attention: bool = True
+    lora_variate_attention: bool = True
+    lora_feedforward: bool = True
 
 
 @dataclasses.dataclass(frozen=True)
@@ -78,7 +81,7 @@ class TrainerConfig:
     max_grad_norm: float = 1.0
     num_workers: int = 0
     gradient_accumulation_steps: int = 1
-    log_every_steps: int = 10
+    log_every_steps: int = 1
     seed: int = 42
     device: str = "auto"
     dtype: Literal["float32", "bfloat16"] = "float32"
@@ -184,6 +187,14 @@ class ExperimentConfig:
             raise ValueError("last_n_layers must be positive")
         if self.adapter.type == "lora" and self.adapter.rank <= 0:
             raise ValueError("adapter rank must be positive")
+        if self.adapter.type == "lora" and not any(
+            (
+                self.adapter.lora_sequence_attention,
+                self.adapter.lora_variate_attention,
+                self.adapter.lora_feedforward,
+            )
+        ):
+            raise ValueError("lora mode requires at least one injection target")
         if self.adapter.alpha <= 0:
             raise ValueError("adapter alpha must be positive")
         if not 0 <= self.adapter.dropout < 1:

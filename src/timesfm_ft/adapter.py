@@ -77,6 +77,9 @@ def configure_tuning(
     lora_rank: int = 8,
     lora_alpha: float = 16.0,
     lora_dropout: float = 0.05,
+    lora_sequence_attention: bool = True,
+    lora_variate_attention: bool = True,
+    lora_feedforward: bool = True,
 ) -> list[str]:
     """Selects trainable parameters, injecting LoRA modules when requested."""
 
@@ -99,7 +102,12 @@ def configure_tuning(
             _set_trainable(layer, True)
     elif mode == "lora":
         for layer in selected_layers:
-            for attention in (layer.seq_attn, layer.var_attn):
+            attentions = []
+            if lora_sequence_attention:
+                attentions.append(layer.seq_attn)
+            if lora_variate_attention:
+                attentions.append(layer.var_attn)
+            for attention in attentions:
                 for name in ("query_proj", "key_proj", "value_proj", "out_proj"):
                     _replace_linear(
                         attention,
@@ -108,14 +116,15 @@ def configure_tuning(
                         alpha=lora_alpha,
                         dropout=lora_dropout,
                     )
-            for name in ("ff0", "ff1"):
-                _replace_linear(
-                    layer,
-                    name,
-                    rank=lora_rank,
-                    alpha=lora_alpha,
-                    dropout=lora_dropout,
-                )
+            if lora_feedforward:
+                for name in ("ff0", "ff1"):
+                    _replace_linear(
+                        layer,
+                        name,
+                        rank=lora_rank,
+                        alpha=lora_alpha,
+                        dropout=lora_dropout,
+                    )
     elif mode != "head":
         raise ValueError(f"unsupported tuning mode: {mode}")
 
@@ -185,6 +194,9 @@ class TimesFM3Adapter(nn.Module):
                 lora_rank=adapter_config.rank,
                 lora_alpha=adapter_config.alpha,
                 lora_dropout=adapter_config.dropout,
+                lora_sequence_attention=adapter_config.lora_sequence_attention,
+                lora_variate_attention=adapter_config.lora_variate_attention,
+                lora_feedforward=adapter_config.lora_feedforward,
             )
         else:
             _set_trainable(backbone, False)

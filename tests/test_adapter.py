@@ -195,6 +195,24 @@ def test_optimizer_groups_use_distinct_learning_rates():
     assert group_lrs == {"head": 3e-4, "adapter": 1e-4}
 
 
+def test_lora_can_skip_variate_attention_for_univariate_inputs():
+    backbone = make_tiny_model()
+    names = configure_tuning(
+        backbone,
+        mode="lora",
+        last_n_layers=1,
+        lora_rank=4,
+        lora_alpha=8.0,
+        lora_dropout=0.0,
+        lora_sequence_attention=True,
+        lora_variate_attention=False,
+        lora_feedforward=True,
+    )
+    assert any("seq_attn" in name and "lora_" in name for name in names)
+    assert any(".ff0.lora_" in name for name in names)
+    assert not any("var_attn" in name and "lora_" in name for name in names)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA BF16 smoke")
 def test_bfloat16_compute_keeps_fp32_master_weights(monkeypatch):
     monkeypatch.setattr(

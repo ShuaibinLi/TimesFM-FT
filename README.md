@@ -46,6 +46,7 @@ TimesFM-FT/
 ├── scripts/
 │   ├── make_synthetic_data.py
 │   ├── prepare_single_product_splits.py
+│   ├── run_train_nohup.sh
 │   ├── run_zn_zero_shot.py
 │   └── smoke_real_checkpoint.py
 ├── src/timesfm_ft/
@@ -145,8 +146,17 @@ python scripts/prepare_single_product_splits.py
 Train the two single-variable models independently:
 
 ```bash
-timesfm-ft --config configs/zn_single_input.json
-timesfm-ft --config configs/es_single_input.json
+scripts/run_train_nohup.sh configs/zn_single_input.json
+scripts/run_train_nohup.sh configs/es_single_input.json
+```
+
+The launcher uses `nohup` and unbuffered `conda run`, appends every micro-batch
+metric to `<output_dir>/train.log`, and writes `<output_dir>/train.pid`.
+Resume an interrupted run with:
+
+```bash
+scripts/run_train_nohup.sh configs/zn_single_input.json \
+  outputs/zn-single-input-c256-h64/last
 ```
 
 ## Contract smoke test
