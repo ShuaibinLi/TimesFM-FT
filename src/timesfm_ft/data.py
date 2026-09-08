@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import math
 from pathlib import Path
-from typing import TypedDict
+from typing import Any, TypedDict
 
 import numpy as np
 import torch
@@ -18,16 +21,11 @@ class WindowBatch(TypedDict):
 
 
 class NpzWindowDataset(Dataset[WindowBatch]):
-    """Loads pre-windowed 500 ms data from an NPZ file.
+    """Loads NPZ smoke data or a memory-mapped production window bundle.
 
-    Required arrays:
-      context_values: (samples, variates, context) or (samples, context)
-      future_values: (samples, horizon), weighted-mid only
-
-    Optional arrays:
-      context_mask: same shape as context_values; True means unavailable
-      future_mask: same shape as future_values; True means excluded from loss
-      timestamps: (samples,), retained by the source file but unused by training
+    A bundle is a directory containing ``context_values.npy``,
+    ``future_values.npy``, ``timestamps.npy``, ``dates.npy``, and
+    ``manifest.json``. Optional masks use matching ``*_mask.npy`` names.
     """
 
     def __init__(
@@ -37,19 +35,21 @@ class NpzWindowDataset(Dataset[WindowBatch]):
         context_length: int,
         horizon_length: int,
         max_variates: int = 32,
+        sampling_interval_seconds: float | None = None,
+        expected_stride: int | None = None,
+        expected_product: str | None = None,
+        expected_split: str | None = None,
+        expected_dates: set[int] | None = None,
+        expected_dates_path: str | Path | None = None,
+        require_metadata: bool = False,
     ) -> None:
         self.path = Path(path)
         if not self.path.exists():
             raise FileNotFoundError(self.path)
 
-        archive = np.load(self.path, allow_pickle=False)
-        if "context_values" not in archive or "future_values" not in archive:
-            raise ValueError(
-                f"{self.path} must contain context_values and future_values"
-            )
-
-        contexts = np.asarray(archive["context_values"], dtype=np.float32)
-        futures = np.asarray(archive["future_values"], dtype=np.float32)
+        loaded = self._load_arrays(self.path)
+        contexts = np.asarray(loaded["context_values"], dtype=np.float32)
+        futures = np.asarray(loaded["future_values"], dtype=np.float32)
         if contexts.ndim == 2:
             contexts = contexts[:, None, :]
         if contexts.ndim != 3:
@@ -73,38 +73,222 @@ class NpzWindowDataset(Dataset[WindowBatch]):
                 f"received {contexts.shape[1]} variates; limit is {max_variates}"
             )
 
-        context_mask = (
-            np.asarray(archive["context_mask"], dtype=np.bool_)
-            if "context_mask" in archive
-            else np.zeros_like(contexts, dtype=np.bool_)
+        context_mask = self._prepare_mask(
+            loaded.get("context_mask"), contexts, "context_mask"
         )
-        future_mask = (
-            np.asarray(archive["future_mask"], dtype=np.bool_)
-            if "future_mask" in archive
-            else np.zeros_like(futures, dtype=np.bool_)
+        future_mask = self._prepare_mask(
+            loaded.get("future_mask"), futures, "future_mask"
         )
-        if context_mask.ndim == 2:
+        if context_mask is not None and context_mask.ndim == 2:
             context_mask = context_mask[:, None, :]
-        if context_mask.shape != contexts.shape:
+        if context_mask is not None and context_mask.shape != contexts.shape:
             raise ValueError(
                 f"context_mask shape {context_mask.shape} != {contexts.shape}"
             )
-        if future_mask.shape != futures.shape:
-            raise ValueError(f"future_mask shape {future_mask.shape} != {futures.shape}")
+        if future_mask is not None and future_mask.shape != futures.shape:
+            raise ValueError(
+                f"future_mask shape {future_mask.shape} != {futures.shape}"
+            )
 
-        context_mask = context_mask | ~np.isfinite(contexts)
-        future_mask = future_mask | ~np.isfinite(futures)
-        if np.any(np.all(context_mask[:, 0, :], axis=-1)):
-            raise ValueError("weighted-mid context cannot be fully masked")
-        if np.any(context_mask[:, 0, -1]):
-            raise ValueError("the weighted-mid value at every forecast cutoff must be valid")
-        if np.any(np.all(future_mask, axis=-1)):
+        context_nonfinite = ~np.isfinite(contexts)
+        future_nonfinite = ~np.isfinite(futures)
+        if context_nonfinite.any():
+            context_mask = (
+                context_nonfinite
+                if context_mask is None
+                else context_mask | context_nonfinite
+            )
+            contexts = np.nan_to_num(contexts, copy=True)
+        if future_nonfinite.any():
+            future_mask = (
+                future_nonfinite
+                if future_mask is None
+                else future_mask | future_nonfinite
+            )
+            futures = np.nan_to_num(futures, copy=True)
+        if context_mask is not None:
+            if np.any(np.all(context_mask[:, 0, :], axis=-1)):
+                raise ValueError("weighted-mid context cannot be fully masked")
+            if np.any(context_mask[:, 0, -1]):
+                raise ValueError(
+                    "the weighted-mid value at every forecast cutoff must be valid"
+                )
+        if future_mask is not None and np.any(np.all(future_mask, axis=-1)):
             raise ValueError("every sample needs at least one valid future target")
 
-        self.context_values = np.nan_to_num(contexts, copy=True)
+        self.context_values = contexts
+        self.future_values = futures
         self.context_mask = context_mask
-        self.future_values = np.nan_to_num(futures, copy=True)
         self.future_mask = future_mask
+        self.timestamps = self._optional_vector(
+            loaded.get("timestamps"), len(contexts), np.int64, "timestamps"
+        )
+        self.dates = self._optional_vector(
+            loaded.get("dates"), len(contexts), np.int32, "dates"
+        )
+        self.metadata = self._load_metadata(self.path)
+        self._validate_metadata(
+            context_length=context_length,
+            horizon_length=horizon_length,
+            sampling_interval_seconds=sampling_interval_seconds,
+            expected_stride=expected_stride,
+            expected_product=expected_product,
+            expected_split=expected_split,
+            expected_dates=expected_dates,
+            expected_dates_path=expected_dates_path,
+            require_metadata=require_metadata,
+        )
+
+    @staticmethod
+    def _load_arrays(path: Path) -> dict[str, np.ndarray]:
+        names = (
+            "context_values",
+            "future_values",
+            "context_mask",
+            "future_mask",
+            "timestamps",
+            "dates",
+        )
+        if path.is_dir():
+            arrays: dict[str, np.ndarray] = {}
+            for name in names:
+                array_path = path / f"{name}.npy"
+                if array_path.exists():
+                    arrays[name] = np.load(
+                        array_path,
+                        mmap_mode="c",
+                        allow_pickle=False,
+                    )
+            if "context_values" not in arrays or "future_values" not in arrays:
+                raise ValueError(
+                    f"{path} must contain context_values.npy and future_values.npy"
+                )
+            return arrays
+
+        with np.load(path, allow_pickle=False) as archive:
+            if "context_values" not in archive or "future_values" not in archive:
+                raise ValueError(
+                    f"{path} must contain context_values and future_values"
+                )
+            return {name: archive[name] for name in names if name in archive}
+
+    @staticmethod
+    def _prepare_mask(
+        mask: np.ndarray | None,
+        values: np.ndarray,
+        name: str,
+    ) -> np.ndarray | None:
+        if mask is None:
+            return None
+        result = np.asarray(mask, dtype=np.bool_)
+        if result.shape != values.shape and not (
+            result.ndim == 2
+            and values.ndim == 3
+            and values.shape[1] == 1
+            and result.shape == (values.shape[0], values.shape[2])
+        ):
+            raise ValueError(f"{name} shape {result.shape} != {values.shape}")
+        return result
+
+    @staticmethod
+    def _optional_vector(
+        value: np.ndarray | None,
+        samples: int,
+        dtype: np.dtype[Any],
+        name: str,
+    ) -> np.ndarray | None:
+        if value is None:
+            return None
+        result = np.asarray(value, dtype=dtype)
+        if result.shape != (samples,):
+            raise ValueError(f"{name} must have shape ({samples},), got {result.shape}")
+        return result
+
+    @staticmethod
+    def _load_metadata(path: Path) -> dict[str, Any] | None:
+        metadata_path = path / "manifest.json" if path.is_dir() else path.with_suffix(".json")
+        if not metadata_path.exists():
+            return None
+        with metadata_path.open(encoding="utf-8") as handle:
+            metadata = json.load(handle)
+        if not isinstance(metadata, dict):
+            raise ValueError(f"dataset metadata must be an object: {metadata_path}")
+        return metadata
+
+    def _validate_metadata(
+        self,
+        *,
+        context_length: int,
+        horizon_length: int,
+        sampling_interval_seconds: float | None,
+        expected_stride: int | None,
+        expected_product: str | None,
+        expected_split: str | None,
+        expected_dates: set[int] | None,
+        expected_dates_path: str | Path | None,
+        require_metadata: bool,
+    ) -> None:
+        if require_metadata and self.metadata is None:
+            raise ValueError(f"dataset metadata is required for {self.path}")
+        if require_metadata and (self.timestamps is None or self.dates is None):
+            raise ValueError(f"timestamps and dates are required for {self.path}")
+        if self.metadata is not None:
+            expected = {
+                "context_length": context_length,
+                "horizon_length": horizon_length,
+                "stride": expected_stride,
+                "product": expected_product,
+                "split": expected_split,
+            }
+            for key, value in expected.items():
+                if value is not None and self.metadata.get(key) != value:
+                    raise ValueError(
+                        f"{self.path} metadata {key}={self.metadata.get(key)!r}, "
+                        f"expected {value!r}"
+                    )
+            if sampling_interval_seconds is not None and not math.isclose(
+                float(self.metadata.get("sampling_interval_seconds", math.nan)),
+                sampling_interval_seconds,
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            ):
+                raise ValueError(
+                    f"{self.path} sampling interval does not match config"
+                )
+            if expected_dates_path is not None:
+                date_hash = hashlib.sha256(
+                    Path(expected_dates_path).read_bytes()
+                ).hexdigest()
+                if self.metadata.get("date_file_sha256") != date_hash:
+                    raise ValueError(
+                        f"{self.path} date-list provenance hash mismatch"
+                    )
+
+        if expected_dates is not None:
+            if self.dates is None:
+                raise ValueError(f"dates are required to validate split {self.path}")
+            actual_dates = set(int(value) for value in np.unique(self.dates))
+            if actual_dates != expected_dates:
+                missing = sorted(expected_dates - actual_dates)
+                extra = sorted(actual_dates - expected_dates)
+                raise ValueError(
+                    f"{self.path} split dates mismatch; missing={missing[:5]} "
+                    f"extra={extra[:5]}"
+                )
+        if expected_stride is not None and sampling_interval_seconds is None:
+            raise ValueError(
+                "sampling_interval_seconds is required with expected_stride"
+            )
+        if self.timestamps is not None and self.dates is not None and expected_stride:
+            expected_step_ns = int(
+                round((sampling_interval_seconds or 0.0) * 1_000_000_000)
+            ) * expected_stride
+            for day in np.unique(self.dates):
+                values = self.timestamps[self.dates == day]
+                if len(values) > 1 and not np.all(np.diff(values) == expected_step_ns):
+                    raise ValueError(
+                        f"{self.path} cutoff cadence mismatch on date {int(day)}"
+                    )
 
     @property
     def num_variates(self) -> int:
@@ -114,9 +298,21 @@ class NpzWindowDataset(Dataset[WindowBatch]):
         return int(self.context_values.shape[0])
 
     def __getitem__(self, index: int) -> WindowBatch:
+        context = torch.from_numpy(np.asarray(self.context_values[index]))
+        future = torch.from_numpy(np.asarray(self.future_values[index]))
+        context_mask = (
+            torch.zeros_like(context, dtype=torch.bool)
+            if self.context_mask is None
+            else torch.from_numpy(np.asarray(self.context_mask[index]))
+        )
+        future_mask = (
+            torch.zeros_like(future, dtype=torch.bool)
+            if self.future_mask is None
+            else torch.from_numpy(np.asarray(self.future_mask[index]))
+        )
         return {
-            "context_values": torch.from_numpy(self.context_values[index]),
-            "context_mask": torch.from_numpy(self.context_mask[index]),
-            "future_values": torch.from_numpy(self.future_values[index]),
-            "future_mask": torch.from_numpy(self.future_mask[index]),
+            "context_values": context,
+            "context_mask": context_mask,
+            "future_values": future,
+            "future_mask": future_mask,
         }

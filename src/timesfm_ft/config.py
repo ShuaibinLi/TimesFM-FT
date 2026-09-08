@@ -13,10 +13,17 @@ class DataConfig:
     train_path: str
     val_path: str
     test_path: str | None = None
+    product: str | None = None
     context_length: int = 256
     horizon_length: int = 64
+    stride: int = 64
     max_variates: int = 32
     sampling_interval_seconds: float = 0.5
+    train_dates_path: str | None = None
+    val_dates_path: str | None = None
+    test_dates_path: str | None = None
+    require_metadata: bool = False
+    eval_only: bool = False
 
 
 @dataclasses.dataclass(frozen=True)
@@ -73,7 +80,13 @@ class TrainerConfig:
     log_every_steps: int = 10
     seed: int = 42
     device: str = "auto"
-    dtype: Literal["float32", "bfloat16"] = "bfloat16"
+    dtype: Literal["float32", "bfloat16"] = "float32"
+    deterministic: bool = False
+    early_stopping_patience: int | None = None
+    checkpoint_metric: Literal["rmse_ticks", "loss", "mean_pinball_ticks"] = (
+        "rmse_ticks"
+    )
+    resume_from: str | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -88,16 +101,44 @@ class ExperimentConfig:
 
     @classmethod
     def from_json(cls, path: str | Path) -> ExperimentConfig:
-        with Path(path).open(encoding="utf-8") as handle:
+        config_path = Path(path).resolve()
+        with config_path.open(encoding="utf-8") as handle:
             raw: dict[str, Any] = json.load(handle)
+        base_dir = config_path.parent
+
+        def resolve_path(value: str | None) -> str | None:
+            if value is None or "://" in value or Path(value).is_absolute():
+                return value
+            return str((base_dir / value).resolve())
+
+        data = dict(raw["data"])
+        for key in (
+            "train_path",
+            "val_path",
+            "test_path",
+            "train_dates_path",
+            "val_dates_path",
+            "test_dates_path",
+        ):
+            if key in data:
+                data[key] = resolve_path(data[key])
+        trainer = dict(raw.get("trainer", {}))
+        if "output_dir" in trainer:
+            trainer["output_dir"] = resolve_path(trainer["output_dir"])
+        if "resume_from" in trainer:
+            trainer["resume_from"] = resolve_path(trainer["resume_from"])
+        model = dict(raw.get("model", {}))
+        checkpoint = model.get("checkpoint")
+        if isinstance(checkpoint, str) and checkpoint.startswith("."):
+            model["checkpoint"] = resolve_path(checkpoint)
         return cls(
-            data=DataConfig(**raw["data"]),
+            data=DataConfig(**data),
             objective=ObjectiveConfig(**raw["objective"]),
-            model=ModelConfig(**raw.get("model", {})),
+            model=ModelConfig(**model),
             adapter=AdapterConfig(**raw.get("adapter", {})),
             optimizer=OptimizerConfig(**raw.get("optimizer", {})),
             scheduler=SchedulerConfig(**raw.get("scheduler", {})),
-            trainer=TrainerConfig(**raw.get("trainer", {})),
+            trainer=TrainerConfig(**trainer),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -108,10 +149,34 @@ class ExperimentConfig:
             raise ValueError("context_length must be positive")
         if self.data.horizon_length <= 0:
             raise ValueError("horizon_length must be positive")
+        if self.data.stride <= 0:
+            raise ValueError("stride must be positive")
         if self.data.sampling_interval_seconds <= 0:
             raise ValueError("sampling_interval_seconds must be positive")
         if self.data.max_variates < 1 or self.data.max_variates > 32:
             raise ValueError("max_variates must be in [1, 32]")
+        if not self.data.eval_only and self.data.train_path == self.data.val_path:
+            raise ValueError("train_path and val_path must differ")
+        if self.data.test_path is not None and self.data.test_path in {
+            self.data.train_path,
+            self.data.val_path,
+        }:
+            raise ValueError("test_path must differ from train_path and val_path")
+        if self.data.require_metadata:
+            required_metadata = {
+                "product": self.data.product,
+                "train_dates_path": self.data.train_dates_path,
+                "val_dates_path": self.data.val_dates_path,
+            }
+            missing = [key for key, value in required_metadata.items() if value is None]
+            if missing:
+                raise ValueError(
+                    f"metadata validation requires fields: {', '.join(missing)}"
+                )
+            if self.data.test_path is not None and self.data.test_dates_path is None:
+                raise ValueError(
+                    "metadata validation requires test_dates_path with test_path"
+                )
         if self.objective.tick_size <= 0:
             raise ValueError("tick_size must be positive")
         if self.adapter.last_n_layers <= 0:
@@ -129,6 +194,8 @@ class ExperimentConfig:
         )
         if any(weight < 0 for weight in objective_weights):
             raise ValueError("objective weights must be non-negative")
+        if not any(weight > 0 for weight in objective_weights):
+            raise ValueError("at least one objective weight must be positive")
         learning_rates = (
             self.optimizer.adapter_learning_rate,
             self.optimizer.head_learning_rate,
@@ -162,3 +229,8 @@ class ExperimentConfig:
             raise ValueError("max_grad_norm must be positive")
         if self.trainer.num_workers < 0:
             raise ValueError("num_workers must be non-negative")
+        if (
+            self.trainer.early_stopping_patience is not None
+            and self.trainer.early_stopping_patience <= 0
+        ):
+            raise ValueError("early_stopping_patience must be positive or null")

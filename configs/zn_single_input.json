@@ -1,12 +1,18 @@
 {
   "data": {
-    "train_path": "data/zn-wmp-500ms/splits/train_c256_h64.npz",
-    "val_path": "data/zn-wmp-500ms/splits/val_c256_h64.npz",
-    "test_path": "data/zn-wmp-500ms/splits/test_c256_h64.npz",
+    "train_path": "../data/zn-wmp-500ms/splits/train_c256_h64",
+    "val_path": "../data/zn-wmp-500ms/splits/val_c256_h64",
+    "test_path": "../data/zn-wmp-500ms/splits/test_c256_h64",
+    "product": "ZN",
     "context_length": 256,
     "horizon_length": 64,
+    "stride": 64,
     "sampling_interval_seconds": 0.5,
-    "max_variates": 1
+    "max_variates": 1,
+    "train_dates_path": "splits/dates-train.txt",
+    "val_dates_path": "splits/dates-val.txt",
+    "test_dates_path": "splits/dates-test.txt",
+    "require_metadata": true
   },
   "model": {
     "checkpoint": "google/timesfm-3.0-pytorch",
@@ -42,15 +48,18 @@
     "min_lr_ratio": 0.1
   },
   "trainer": {
-    "output_dir": "outputs/zn-single-input-c256-h64",
-    "epochs": 10,
-    "batch_size": 16,
+    "output_dir": "../outputs/zn-single-input-c256-h64",
+    "epochs": 5,
+    "batch_size": 32,
     "max_grad_norm": 1.0,
     "num_workers": 4,
-    "gradient_accumulation_steps": 4,
+    "gradient_accumulation_steps": 2,
     "log_every_steps": 10,
     "seed": 42,
     "device": "auto",
-    "dtype": "bfloat16"
+    "dtype": "float32",
+    "deterministic": true,
+    "early_stopping_patience": 2,
+    "checkpoint_metric": "rmse_ticks"
   }
 }

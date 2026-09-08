@@ -147,6 +147,7 @@ def _metric_rows(
     predictions: np.ndarray,
     targets: np.ndarray,
     origins: np.ndarray,
+    target_mask: np.ndarray,
     *,
     tick_size: float,
     interval_seconds: float,
@@ -155,9 +156,13 @@ def _metric_rows(
     target_ticks = (targets - origins[:, None]) / tick_size
     rows: list[dict[str, object]] = []
     for index in range(predictions.shape[1]):
-        prediction_error = prediction_ticks[:, index] - target_ticks[:, index]
-        persistence_error = target_ticks[:, index]
-        nonzero = target_ticks[:, index] != 0.0
+        valid = ~target_mask[:, index]
+        prediction_error = (
+            prediction_ticks[valid, index] - target_ticks[valid, index]
+        )
+        persistence_error = target_ticks[valid, index]
+        nonzero = persistence_error != 0.0
+        baseline_sse = np.sum(persistence_error**2)
         rows.append(
             {
                 "step": index + 1,
@@ -168,16 +173,19 @@ def _metric_rows(
                 "persistence_rmse_ticks": float(
                     np.sqrt(np.mean(persistence_error**2))
                 ),
-                "oos_r2_vs_persistence": float(
-                    1.0
-                    - np.sum(prediction_error**2) / np.sum(persistence_error**2)
+                "oos_r2_vs_persistence": (
+                    float(1.0 - np.sum(prediction_error**2) / baseline_sse)
+                    if baseline_sse > 0
+                    else None
                 ),
                 "directional_accuracy": float(
                     np.mean(
-                        np.sign(prediction_ticks[nonzero, index])
-                        == np.sign(target_ticks[nonzero, index])
+                        np.sign(prediction_ticks[valid, index][nonzero])
+                        == np.sign(persistence_error[nonzero])
                     )
-                ),
+                )
+                if np.any(nonzero)
+                else None,
                 "nonzero_targets": int(np.sum(nonzero)),
             }
         )
@@ -189,6 +197,7 @@ def _daily_rows(
     targets: np.ndarray,
     origins: np.ndarray,
     dates: np.ndarray,
+    target_mask: np.ndarray,
     *,
     tick_size: float,
     horizon_seconds: float,
@@ -197,7 +206,7 @@ def _daily_rows(
     target_ticks = (targets[:, -1] - origins) / tick_size
     rows: list[dict[str, object]] = []
     for day in sorted(np.unique(dates)):
-        selected = dates == day
+        selected = (dates == day) & ~target_mask[:, -1]
         error = prediction_ticks[selected] - target_ticks[selected]
         baseline = target_ticks[selected]
         nonzero = baseline != 0.0
@@ -208,11 +217,15 @@ def _daily_rows(
                 "horizon_seconds": horizon_seconds,
                 "mae_ticks": float(np.mean(np.abs(error))),
                 "persistence_mae_ticks": float(np.mean(np.abs(baseline))),
-                "directional_accuracy": float(
+                "directional_accuracy": (
+                    float(
                     np.mean(
                         np.sign(prediction_ticks[selected][nonzero])
                         == np.sign(baseline[nonzero])
                     )
+                    )
+                    if np.any(nonzero)
+                    else None
                 ),
             }
         )
@@ -519,6 +532,7 @@ def evaluate(
         config.adapter,
         device=device,
         dtype=config.trainer.dtype,
+        configure_for_training=False,
     )
     model.eval()
     accumulator = EvaluationAccumulator(
@@ -531,6 +545,7 @@ def evaluate(
     median_index = int(np.argmin(np.abs(quantile_values - 0.5)))
     quantile_predictions: list[np.ndarray] = []
     targets: list[np.ndarray] = []
+    target_masks: list[np.ndarray] = []
     origins: list[np.ndarray] = []
     started = time.perf_counter()
 
@@ -548,6 +563,7 @@ def evaluate(
         accumulator.update(prediction, future, origin, future_mask)
         quantile_predictions.append(prediction.float().cpu().numpy())
         targets.append(future.float().cpu().numpy())
+        target_masks.append(future_mask.cpu().numpy())
         origins.append(origin.float().cpu().numpy())
         if step % 25 == 0 or step == len(loader):
             LOGGER.info("inference_progress step=%d/%d", step, len(loader))
@@ -558,12 +574,14 @@ def evaluate(
     quantile_prediction_array = np.concatenate(quantile_predictions)
     prediction_array = quantile_prediction_array[:, :, median_index]
     target_array = np.concatenate(targets)
+    target_mask_array = np.concatenate(target_masks)
     origin_array = np.concatenate(origins)
     summary, probabilistic_rows = accumulator.results()
     horizon_rows = _metric_rows(
         prediction_array,
         target_array,
         origin_array,
+        target_mask_array,
         tick_size=config.objective.tick_size,
         interval_seconds=config.data.sampling_interval_seconds,
     )
@@ -574,6 +592,7 @@ def evaluate(
         target_array,
         origin_array,
         dates,
+        target_mask_array,
         tick_size=config.objective.tick_size,
         horizon_seconds=(
             config.data.horizon_length * config.data.sampling_interval_seconds
@@ -613,6 +632,7 @@ def evaluate(
         dates=dates,
         origins=origin_array,
         actual=target_array,
+        future_mask=target_mask_array,
         prediction_p50=prediction_array,
         prediction_quantiles=quantile_prediction_array,
         quantiles=quantile_values,

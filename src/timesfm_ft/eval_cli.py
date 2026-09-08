@@ -19,9 +19,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--adapter",
         help="Path to adapter.pt. Omit for official zero-shot evaluation.",
     )
-    parser.add_argument(
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument(
         "--data",
-        help="Evaluation NPZ path. Defaults to data.val_path from the config.",
+        help="Explicit evaluation dataset path; train_path is refused.",
+    )
+    source.add_argument(
+        "--split",
+        choices=("val", "test"),
+        help="Configured split to evaluate (default: test when available).",
     )
     parser.add_argument(
         "--output-dir",
@@ -51,6 +57,7 @@ def main() -> None:
         output_dir=args.output_dir,
         batch_size=args.batch_size,
         device_name=args.device,
+        split=args.split,
     )
     logging.getLogger(__name__).info("artifacts=%s", destination)
 

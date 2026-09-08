@@ -55,6 +55,7 @@ def save_split(
     contexts: np.ndarray,
     futures: np.ndarray,
     train_count: int,
+    val_count: int,
 ) -> None:
     root.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
@@ -64,8 +65,13 @@ def save_split(
     )
     np.savez_compressed(
         root / "val.npz",
-        context_values=contexts[train_count:],
-        future_values=futures[train_count:],
+        context_values=contexts[train_count : train_count + val_count],
+        future_values=futures[train_count : train_count + val_count],
+    )
+    np.savez_compressed(
+        root / "test.npz",
+        context_values=contexts[train_count + val_count :],
+        future_values=futures[train_count + val_count :],
     )
 
 
@@ -93,12 +99,21 @@ def main() -> None:
         seed=args.seed,
     )
     train_count = max(1, round(args.num_samples * 0.8))
-    train_count = min(train_count, args.num_samples - 1)
+    val_count = max(1, round(args.num_samples * 0.1))
+    train_count = min(train_count, args.num_samples - 2)
+    val_count = min(val_count, args.num_samples - train_count - 1)
+    test_count = args.num_samples - train_count - val_count
     output_root = Path(args.output_root)
-    save_split(output_root / "multi", multi_contexts, futures, train_count)
-    save_split(output_root / "single", multi_contexts[:, :1, :], futures, train_count)
+    save_split(output_root / "multi", multi_contexts, futures, train_count, val_count)
+    save_split(
+        output_root / "single",
+        multi_contexts[:, :1, :],
+        futures,
+        train_count,
+        val_count,
+    )
     print(
-        f"saved {train_count} train and {args.num_samples - train_count} validation "
+        f"saved {train_count} train, {val_count} validation, and {test_count} test "
         f"samples under {output_root}"
     )
 

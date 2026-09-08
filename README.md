@@ -29,12 +29,12 @@ guard fails loudly if the upstream implementation changes.
 
 The toolkit adds:
 
-- NPZ data validation for both input routes;
+- memory-mapped production bundles plus NPZ smoke-data validation;
 - single-target extraction from multivariate TimesFM output;
-- pinball, median Huber, and quantile-crossing losses in tick space;
+- tail-quantile pinball, P50 Huber, and quantile-crossing losses in tick space;
 - head-only, native LoRA, partial-unfreeze, and full fine-tuning modes;
-- train/validation loops, gradient accumulation, warmup/cosine scheduling, and
-  adapter-only checkpoints;
+- train/validation loops, deterministic loading, early stopping, warmup/cosine
+  scheduling, and atomic resumable checkpoints;
 - tiny-model tests that verify decode parity and gradient flow.
 
 ## Repository layout
@@ -55,7 +55,8 @@ TimesFM-FT/
 └── tests/
 ```
 
-The upstream submodule is intentionally not modified.
+The upstream submodule is intentionally not modified and is pinned at
+`0df95ae62085a6ac0d0afd1ad40dee2e6c1356ab`.
 
 ## Setup
 
@@ -81,8 +82,9 @@ unit tests with a reduced model.
 
 ## Data contract
 
-Each train or validation file is an NPZ archive containing pre-windowed,
-chronologically split samples.
+Production datasets are memory-mapped directories containing pre-windowed,
+chronologically split `.npy` arrays plus `manifest.json`. NPZ remains supported
+for small smoke fixtures.
 
 Required arrays:
 
@@ -91,13 +93,15 @@ context_values: float32[S, V, C] or float32[S, C]
 future_values:  float32[S, H]
 ```
 
-Optional arrays:
+Production bundles also require:
 
 ```text
-context_mask: bool[S, V, C] or bool[S, C]  # True means unavailable
-future_mask:  bool[S, H]                   # True means exclude from loss
-timestamps:   int64[S]                     # retained for auditing, not training
+timestamps: int64[S]  # forecast cutoff on the audited grid
+dates:      int32[S]  # trade date used for split enforcement
+manifest.json         # product/cadence/C/H/stride/source/date-list hashes
 ```
+
+Optional mask arrays use `True` for unavailable/excluded values.
 
 Conventions:
 
@@ -108,8 +112,8 @@ Conventions:
 - variates `1..V-1` are past-only covariates;
 - the weighted-mid value at the forecast cutoff must be present;
 - `future_values` always contains weighted-mid only;
-- train and validation files must already come from purged chronological
-  splits, never random row splits.
+- train, validation, and test bundles must come from disjoint chronological
+  split lists, never random row splits.
 
 Both supplied datasets must share exactly the same timestamps and
 `future_values` before A/B model comparisons are accepted.
@@ -125,9 +129,11 @@ lists under `configs/splits/`:
 
 All observations are exactly 500 ms apart. Production windows use 256 context
 points (128 seconds), 64 future points (32 seconds), and a 64-point stride.
-Build both products' day-safe NPZ files without crossing session boundaries:
+Data preparation requires GCS application-default credentials. Build both
+products' day-safe, memory-mapped bundles without crossing session boundaries:
 
 ```bash
+gcloud auth application-default login
 python scripts/prepare_single_product_splits.py
 ```
 
@@ -149,8 +155,8 @@ python scripts/make_synthetic_data.py
 This writes ignored files under:
 
 ```text
-data/single/{train,val}.npz
-data/multi/{train,val}.npz
+data/single/{train,val,test}.npz
+data/multi/{train,val,test}.npz
 ```
 
 The synthetic values only test plumbing. They are not a forecasting benchmark.
@@ -179,8 +185,12 @@ use the 500 ms, `C=256` (128 seconds), `H=64` (32 seconds) contract.
 
 ## Train
 
-First update `objective.tick_size` in both configs to the instrument's actual tick
-size.
+ZN and ES configs already pin their actual tick sizes. Generic templates must
+set `objective.tick_size` before use. Parameters, optimizer state, and
+tick-space loss remain FP32. The adapter supports BF16 autocast without casting
+master weights, but production configs currently use FP32 compute: the pinned
+TimesFM 3 checkpoint produces non-finite attention-LoRA gradients under BF16
+on GB10, and the trainer fails closed on any non-finite loss or gradient.
 
 Single-input route:
 
@@ -195,32 +205,44 @@ timesfm-ft --config configs/multi_input.json
 ```
 
 Both routes use matched defaults so that only the input variates differ.
+Training writes atomic `best/` and `last/` states. Set
+`trainer.resume_from` to either checkpoint directory or its
+`training_state.pt` to resume optimizer, scheduler, epoch, history, DataLoader,
+and RNG state exactly.
 
 ## Inference and evaluation
 
 Fine-tuned evaluation reconstructs the official backbone and matching adapter
 structure, loads `adapter.pt`, and then calls the official
 `TimesFM3Torch.decode()` method. The differentiable decode bypass is used only
-during training.
+during training. Parity is with raw `TimesFM3Torch.decode`; unlike the
+high-level `TimesFM3Forecaster`, quantiles are not sorted after decode so
+crossing remains observable and measurable.
 
 Evaluate a fine-tuned adapter:
 
 ```bash
 timesfm-eval \
-  --config outputs/single-input/experiment_config.json \
-  --adapter outputs/single-input/best/adapter.pt
+  --config outputs/zn-single-input-c256-h64/experiment_config.json \
+  --adapter outputs/zn-single-input-c256-h64/best/adapter.pt \
+  --split test
 ```
 
-Run the same dataset with the untouched official checkpoint:
+When `test_path` exists, `test` is the default. Use `--split val` only for
+model development. Explicit `--data` is mutually exclusive with `--split`,
+and evaluation refuses `train_path`.
+
+Run the holdout with the untouched official checkpoint:
 
 ```bash
-timesfm-eval --config configs/single_input.json
+timesfm-eval --config configs/zn_single_input.json --split test
 ```
 
 Optional arguments:
 
 ```text
---data PATH        override data.val_path
+--split {val,test} choose a configured chronological split
+--data PATH        explicit non-training dataset (mutually exclusive with --split)
 --output-dir PATH  override the metric directory
 --batch-size N     override trainer.batch_size
 --device DEVICE    override trainer.device
@@ -282,14 +304,15 @@ ticks[h] = (weighted_mid[t+h] - weighted_mid[t]) / tick_size
 The default objective is:
 
 ```text
-pinball(all quantiles)
+pinball(P10, P20, P30, P40, P60, P70, P80, P90)
 + 0.5 * Huber(P50)
 + 0.05 * quantile-crossing penalty
 ```
 
-TimesFM 3 emits 64 output points per anchor. The requested 60-point horizon is
-returned directly by official decode logic; the internal padding points are
-not exposed to the loss.
+P50 is deliberately excluded from Pinball so it is not supervised twice.
+Best-checkpoint selection uses mask-aware validation P50 RMSE in ticks, while
+composite loss, persistence RMSE, OOS R², direction, coverage, and crossing are
+all logged. TimesFM emits and returns the requested 64 points (32 seconds).
 
 ## Outputs
 
@@ -300,11 +323,19 @@ experiment_config.json
 history.jsonl
 best/
 ├── adapter.pt
-└── adapter_config.json
+├── adapter_config.json
+└── training_state.pt
+last/
+├── adapter.pt
+├── adapter_config.json
+└── training_state.pt
 ```
 
 `adapter.pt` contains only parameters marked trainable by the selected tuning
-mode. For `full`, this is necessarily the complete model state.
+mode. `training_state.pt` additionally contains optimizer, scheduler, epoch,
+history, RNG, config, and data provenance required for exact resume. Adapter
+metadata is validated against the current base checkpoint and tuning structure
+before loading.
 
 Console logs include:
 
@@ -313,7 +344,8 @@ Console logs include:
 - step-level total/pinball/Huber/crossing loss and current group LRs;
 - epoch-level train/validation components, gradient norm, elapsed time, and
   samples per second;
-- best-checkpoint and run-completion events.
+- persistence-relative validation metrics, early stopping, checkpoint, resume,
+  and run-completion events.
 
 `history.jsonl` stores the epoch metrics and current LR for machine-readable
 analysis.
@@ -329,15 +361,15 @@ The critical tests verify:
 
 1. differentiable decode equals official inference decode before training;
 2. gradients reach the output head;
-3. injected LoRA is initially output-preserving and receives gradients;
-4. single and multi NPZ contracts are validated consistently.
+3. mixed-precision plumbing preserves FP32 master weights and dtype-safe inference;
+4. balanced loss, masks, crossings, and all-masked rejection;
+5. NPZ and memory-mapped bundle contracts plus split/session provenance;
+6. partial accumulation, early stopping, atomic checkpoints, and exact resume;
+7. explicit holdout selection and adapter metadata compatibility.
 
-## Next integration step
-
-When the real datasets arrive:
-
-1. map their storage format into the documented window contract;
-2. verify single/multi timestamps and labels are exactly aligned;
-3. add day/session metadata validation and a split audit;
-4. run head-only overfit tests on a tiny subset;
-5. run matched zero-shot, head, and LoRA experiments.
+Before a long run, execute
+`python scripts/smoke_real_checkpoint.py --dtype float32`; it performs a
+real-checkpoint train step plus save/load/resume parity.
+Then compare untouched zero-shot, head-only, and LoRA against persistence on
+the same test bundle. Treat BF16 as experimental until its real-checkpoint gate
+passes.

@@ -1,14 +1,15 @@
 {
   "data": {
-    "train_path": "data/zn-wmp-500ms/eval_c256_h64.npz",
-    "val_path": "data/zn-wmp-500ms/eval_c256_h64.npz",
+    "train_path": "../data/zn-wmp-500ms/eval_c256_h64.npz",
+    "val_path": "../data/zn-wmp-500ms/eval_c256_h64.npz",
     "context_length": 256,
     "horizon_length": 64,
     "sampling_interval_seconds": 0.5,
-    "max_variates": 1
+    "max_variates": 1,
+    "eval_only": true
   },
   "model": {
-    "checkpoint": "../timesfm-3.0-pytorch",
+    "checkpoint": "../../timesfm-3.0-pytorch",
     "disable_linear_detrending": false
   },
   "adapter": {
@@ -22,7 +23,7 @@
     "tick_size": 0.015625
   },
   "trainer": {
-    "output_dir": "outputs/zn-zero-shot-c256-h64",
+    "output_dir": "../outputs/zn-zero-shot-c256-h64",
     "epochs": 1,
     "batch_size": 32,
     "num_workers": 0,

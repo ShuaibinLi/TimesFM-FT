@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+
+import pytest
 import torch
 from timesfm3 import (
     ResidualBlockConfig,
@@ -9,7 +12,7 @@ from timesfm3 import (
 )
 
 from timesfm_ft.adapter import LoRALinear, TimesFM3Adapter, configure_tuning
-from timesfm_ft.config import OptimizerConfig
+from timesfm_ft.config import AdapterConfig, ModelConfig, OptimizerConfig
 from timesfm_ft.losses import ForecastLoss
 
 
@@ -160,3 +163,42 @@ def test_optimizer_groups_use_distinct_learning_rates():
     groups = adapter.optimizer_parameter_groups(config)
     group_lrs = {group["group_name"]: group["lr"] for group in groups}
     assert group_lrs == {"head": 3e-4, "adapter": 1e-4}
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA BF16 smoke")
+def test_bfloat16_compute_keeps_fp32_master_weights(monkeypatch):
+    monkeypatch.setattr(
+        TimesFM3Torch,
+        "from_pretrained",
+        classmethod(lambda cls, _checkpoint: make_tiny_model()),
+    )
+    adapter = TimesFM3Adapter.from_pretrained(
+        ModelConfig(checkpoint="tiny"),
+        AdapterConfig(type="head", last_n_layers=1),
+        device=torch.device("cuda"),
+        dtype="bfloat16",
+    )
+    assert adapter.compute_dtype == "bfloat16"
+    assert {parameter.dtype for parameter in adapter.parameters()} == {torch.float32}
+    context = torch.randn(2, 1, 16, device="cuda")
+    prediction = adapter.predict(context, horizon=6)
+    assert prediction.dtype == torch.float32
+    assert torch.isfinite(prediction).all()
+
+
+def test_load_adapter_rejects_metadata_mismatch(tmp_path):
+    backbone = make_tiny_model()
+    names = configure_tuning(backbone, mode="head", last_n_layers=1)
+    adapter = TimesFM3Adapter(
+        backbone,
+        checkpoint="tiny",
+        tuning_mode="head",
+        trainable_names=names,
+    )
+    adapter.save_adapter(tmp_path)
+    metadata_path = tmp_path / "adapter_config.json"
+    metadata = json.loads(metadata_path.read_text())
+    metadata["checkpoint"] = "wrong"
+    metadata_path.write_text(json.dumps(metadata))
+    with pytest.raises(ValueError, match="metadata mismatch"):
+        adapter.load_adapter(tmp_path / "adapter.pt")

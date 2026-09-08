@@ -1,7 +1,7 @@
 {
   "data": {
-    "train_path": "data/dummy/single/train.npz",
-    "val_path": "data/dummy/single/val.npz",
+    "train_path": "../data/dummy/single/train.npz",
+    "val_path": "../data/dummy/single/val.npz",
     "context_length": 32,
     "horizon_length": 16,
     "sampling_interval_seconds": 0.5,
@@ -41,7 +41,7 @@
     "min_lr_ratio": 0.1
   },
   "trainer": {
-    "output_dir": "outputs/smoke-test",
+    "output_dir": "../outputs/smoke-test",
     "epochs": 1,
     "batch_size": 1,
     "max_grad_norm": 1.0,

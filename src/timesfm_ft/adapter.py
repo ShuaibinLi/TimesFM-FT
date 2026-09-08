@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from pathlib import Path
 from typing import Any, Literal
 
@@ -140,12 +141,14 @@ class TimesFM3Adapter(nn.Module):
         checkpoint: str | None = None,
         tuning_mode: str | None = None,
         trainable_names: list[str] | None = None,
+        compute_dtype: Literal["float32", "bfloat16"] = "float32",
     ) -> None:
         super().__init__()
         self.backbone = backbone
         self.checkpoint = checkpoint
         self.tuning_mode = tuning_mode
         self.trainable_names = tuple(trainable_names or ())
+        self.compute_dtype = compute_dtype
         decorated_decode = getattr(type(backbone), "decode", None)
         decode_impl = getattr(decorated_decode, "__wrapped__", None)
         if decode_impl is None:
@@ -163,6 +166,7 @@ class TimesFM3Adapter(nn.Module):
         *,
         device: torch.device,
         dtype: Literal["float32", "bfloat16"],
+        configure_for_training: bool = True,
     ) -> TimesFM3Adapter:
         """Loads and configures the official TimesFM 3 checkpoint."""
 
@@ -171,24 +175,39 @@ class TimesFM3Adapter(nn.Module):
         backbone = TimesFM3Torch.from_pretrained(model_config.checkpoint)
         if model_config.disable_linear_detrending:
             backbone.use_linear_detrending = False
-        trainable_names = configure_tuning(
-            backbone,
-            mode=adapter_config.type,
-            last_n_layers=adapter_config.last_n_layers,
-            lora_rank=adapter_config.rank,
-            lora_alpha=adapter_config.alpha,
-            lora_dropout=adapter_config.dropout,
+        if configure_for_training:
+            trainable_names = configure_tuning(
+                backbone,
+                mode=adapter_config.type,
+                last_n_layers=adapter_config.last_n_layers,
+                lora_rank=adapter_config.rank,
+                lora_alpha=adapter_config.alpha,
+                lora_dropout=adapter_config.dropout,
+            )
+        else:
+            _set_trainable(backbone, False)
+            trainable_names = []
+        effective_compute_dtype = (
+            "bfloat16" if dtype == "bfloat16" and device.type == "cuda" else "float32"
         )
         adapter = cls(
             backbone,
             checkpoint=model_config.checkpoint,
-            tuning_mode=adapter_config.type,
+            tuning_mode=adapter_config.type if configure_for_training else None,
             trainable_names=trainable_names,
+            compute_dtype=effective_compute_dtype,
         )
-        parameter_dtype = (
-            torch.bfloat16 if dtype == "bfloat16" and device.type == "cuda" else torch.float32
+        # Keep FP32 master parameters and optimizer state. BF16 is a compute
+        # policy applied through autocast in forward/predict, not a storage dtype.
+        return adapter.to(device=device, dtype=torch.float32)
+
+    def _autocast_context(self) -> torch.autocast:
+        device = next(self.parameters()).device
+        return torch.autocast(
+            device_type=device.type,
+            dtype=torch.bfloat16,
+            enabled=self.compute_dtype == "bfloat16" and device.type == "cuda",
         )
-        return adapter.to(device=device, dtype=parameter_dtype)
 
     @property
     def quantiles(self) -> tuple[float, ...]:
@@ -262,7 +281,8 @@ class TimesFM3Adapter(nn.Module):
             horizon=horizon,
             context_mask=context_mask,
         )
-        all_quantiles = self._decode_impl(self.backbone, **decode_kwargs)
+        with self._autocast_context():
+            all_quantiles = self._decode_impl(self.backbone, **decode_kwargs)
         return all_quantiles[:, 0, :horizon, :]
 
     @torch.inference_mode()
@@ -280,7 +300,8 @@ class TimesFM3Adapter(nn.Module):
             horizon=horizon,
             context_mask=context_mask,
         )
-        all_quantiles = self.backbone.decode(**decode_kwargs)
+        with self._autocast_context():
+            all_quantiles = self.backbone.decode(**decode_kwargs)
         return all_quantiles[:, 0, :horizon, :]
 
     @staticmethod
@@ -329,6 +350,7 @@ class TimesFM3Adapter(nn.Module):
         return {
             "checkpoint": self.checkpoint,
             "tuning_mode": self.tuning_mode,
+            "compute_dtype": self.compute_dtype,
             "trainable_names": self.trainable_names,
             "quantiles": self.quantiles,
             "parameter_summary": self.parameter_summary,
@@ -342,21 +364,51 @@ class TimesFM3Adapter(nn.Module):
     ) -> None:
         destination = Path(output_dir)
         destination.mkdir(parents=True, exist_ok=True)
-        torch.save(self.trainable_state_dict(), destination / "adapter.pt")
+        state_path = destination / "adapter.pt"
+        temporary_state = state_path.with_suffix(".pt.tmp")
+        torch.save(self.trainable_state_dict(), temporary_state)
+        os.replace(temporary_state, state_path)
         combined_metadata = self.checkpoint_metadata()
         combined_metadata.update(metadata or {})
-        with (destination / "adapter_config.json").open("w", encoding="utf-8") as handle:
+        metadata_path = destination / "adapter_config.json"
+        temporary_metadata = metadata_path.with_suffix(".json.tmp")
+        with temporary_metadata.open("w", encoding="utf-8") as handle:
             json.dump(combined_metadata, handle, indent=2, sort_keys=True)
+        os.replace(temporary_metadata, metadata_path)
 
     def load_adapter(self, path: str | Path) -> None:
         """Loads parameters after applying the matching tuning configuration."""
 
-        state = torch.load(Path(path), map_location="cpu", weights_only=True)
+        checkpoint_path = Path(path)
+        metadata_path = checkpoint_path.parent / "adapter_config.json"
+        if not metadata_path.exists():
+            raise ValueError(f"adapter metadata not found: {metadata_path}")
+        with metadata_path.open(encoding="utf-8") as handle:
+            metadata = json.load(handle)
+        expected_metadata = {
+            "checkpoint": self.checkpoint,
+            "tuning_mode": self.tuning_mode,
+            "trainable_names": list(self.trainable_names),
+            "quantiles": list(self.quantiles),
+        }
+        for key, expected_value in expected_metadata.items():
+            if metadata.get(key) != expected_value:
+                raise ValueError(
+                    f"adapter metadata mismatch for {key}: "
+                    f"received {metadata.get(key)!r}, expected {expected_value!r}"
+                )
+
+        state = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
         if not isinstance(state, dict) or not all(
             isinstance(name, str) and isinstance(value, torch.Tensor)
             for name, value in state.items()
         ):
             raise ValueError("adapter checkpoint must be a tensor state dictionary")
+        self.load_trainable_state_dict(state)
+
+    def load_trainable_state_dict(self, state: dict[str, torch.Tensor]) -> None:
+        """Load an already-deserialized trainable-only state dictionary."""
+
         expected = {
             name
             for name, parameter in self.backbone.named_parameters()

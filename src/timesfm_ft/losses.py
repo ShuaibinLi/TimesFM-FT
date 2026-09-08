@@ -19,7 +19,7 @@ class LossOutput:
 
 def _masked_mean(values: torch.Tensor, valid: torch.Tensor) -> torch.Tensor:
     weights = valid.to(values.dtype)
-    denominator = weights.sum().clamp_min(1.0)
+    denominator = weights.sum()
     return (values * weights).sum() / denominator
 
 
@@ -51,6 +51,18 @@ class ForecastLoss(nn.Module):
         self.crossing_weight = crossing_weight
         self.huber_delta_ticks = huber_delta_ticks
         self.median_index = int(torch.argmin(torch.abs(quantile_tensor - 0.5)).item())
+        if abs(float(quantile_tensor[self.median_index]) - 0.5) > 1e-6:
+            raise ValueError("balanced objective requires an explicit 0.5 quantile")
+        tail_indices = [
+            index for index in range(len(quantiles)) if index != self.median_index
+        ]
+        if not tail_indices:
+            raise ValueError("balanced objective requires at least one non-median quantile")
+        self.register_buffer(
+            "tail_indices",
+            torch.tensor(tail_indices, dtype=torch.long),
+            persistent=False,
+        )
 
     def forward(
         self,
@@ -71,22 +83,37 @@ class ForecastLoss(nn.Module):
         if target_mask is not None and target_mask.shape != targets.shape:
             raise ValueError("target_mask must match targets")
 
+        predictions = predictions.float()
+        targets = targets.float()
+        current_price = current_price.float()
         valid = (
             ~target_mask.bool()
             if target_mask is not None
             else torch.ones_like(targets, dtype=torch.bool)
         )
+        if not torch.any(valid).item():
+            raise ValueError("loss batch has no valid target values")
         origin = current_price[:, None]
         target_ticks = (targets - origin) / self.tick_size
         prediction_ticks = (predictions - origin[:, :, None]) / self.tick_size
 
-        # 9 个分位数的概率预测。
-        # Pinball loss 让不同输出头学习不同条件分位数；
-        # MSE 只能学习一个条件均值，因此不足以训练分位数输出。
+        # Tail quantiles learn the conditional distribution with pinball loss.
+        # P50 is intentionally excluded here because it receives dedicated,
+        # smooth Huber supervision below.
         errors = target_ticks[:, :, None] - prediction_ticks
-        quantiles = self.quantiles_tensor.to(predictions.dtype)[None, None, :]
-        pinball_values = torch.maximum(quantiles * errors, (quantiles - 1.0) * errors)
-        pinball = _masked_mean(pinball_values, valid[:, :, None].expand_as(pinball_values))
+        tail_indices = self.tail_indices.to(predictions.device)
+        tail_errors = errors.index_select(-1, tail_indices)
+        tail_quantiles = self.quantiles_tensor.to(predictions.device).index_select(
+            0, tail_indices
+        )[None, None, :]
+        pinball_values = torch.maximum(
+            tail_quantiles * tail_errors,
+            (tail_quantiles - 1.0) * tail_errors,
+        )
+        pinball = _masked_mean(
+            pinball_values,
+            valid[:, :, None].expand_as(pinball_values),
+        )
 
         # P50 点预测稳定性。主要是希望所有 quantile 都合理，P50 特别准确。
         # 所以 Pinball 负责整体概率分布，Huber 对 P50 额外加权。
