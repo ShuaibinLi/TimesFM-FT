@@ -43,11 +43,16 @@ The toolkit adds:
 TimesFM-FT/
 ├── 3rdparty/timesfm/        # pinned official upstream submodule
 ├── configs/                 # matched single/multi experiment configs
-├── scripts/                 # synthetic contract data generator
+├── scripts/
+│   ├── make_synthetic_data.py
+│   ├── prepare_single_product_splits.py
+│   ├── run_zn_zero_shot.py
+│   └── smoke_real_checkpoint.py
 ├── src/timesfm_ft/
 │   ├── config.py
 │   ├── data.py
 │   ├── losses.py
+│   ├── metrics.py
 │   ├── adapter.py            # all TimesFM-specific loading and adaptation
 │   ├── evaluator.py          # official decode + streaming forecast metrics
 │   ├── trainer.py
@@ -204,7 +209,10 @@ Multi-input, single-output route:
 timesfm-ft --config configs/multi_input.json
 ```
 
-Both routes use matched defaults so that only the input variates differ.
+These two files are templates: their `data/{single,multi}` paths are generated
+by `scripts/make_synthetic_data.py` or replaced with real audited bundles.
+The ZN/ES configs are the ready-to-run production definitions. Both generic
+routes use matched defaults so that only the input variates differ.
 Training writes atomic `best/` and `last/` states. Set
 `trainer.resume_from` to either checkpoint directory or its
 `training_state.pt` to resume optimizer, scheduler, epoch, history, DataLoader,
@@ -230,7 +238,8 @@ timesfm-eval \
 
 When `test_path` exists, `test` is the default. Use `--split val` only for
 model development. Explicit `--data` is mutually exclusive with `--split`,
-and evaluation refuses `train_path`.
+still requires a manifest declaring `val` or `test`, and rejects both the
+configured train path and copied bundles declaring `split=train`.
 
 Run the holdout with the untouched official checkpoint:
 
@@ -243,6 +252,7 @@ Optional arguments:
 ```text
 --split {val,test} choose a configured chronological split
 --data PATH        explicit non-training dataset (mutually exclusive with --split)
+--unsafe-data      bypass explicit-data provenance checks (requires --data)
 --output-dir PATH  override the metric directory
 --batch-size N     override trainer.batch_size
 --device DEVICE    override trainer.device
@@ -353,6 +363,7 @@ analysis.
 ## Verification
 
 ```bash
+conda activate timesfm-ft
 pytest
 ruff check src tests scripts
 ```

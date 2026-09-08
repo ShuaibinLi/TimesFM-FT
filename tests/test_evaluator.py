@@ -66,6 +66,22 @@ def test_evaluation_accumulator_respects_masks_and_detects_crossing():
     assert rows[1]["valid_points"] == 0
 
 
+def test_evaluation_accumulator_rejects_nonfinite_predictions():
+    accumulator = EvaluationAccumulator(
+        horizon=1,
+        quantiles=(0.1, 0.5, 0.9),
+        tick_size=1.0,
+        sampling_interval_seconds=0.5,
+    )
+    with pytest.raises(ValueError, match="non-finite"):
+        accumulator.update(
+            torch.tensor([[[0.0, float("nan"), 1.0]]]),
+            torch.zeros(1, 1),
+            current_price=torch.zeros(1),
+            target_mask=torch.zeros(1, 1, dtype=torch.bool),
+        )
+
+
 class _PersistenceModel:
     quantiles = (0.1, 0.5, 0.9)
 
@@ -120,3 +136,18 @@ def test_evaluate_defaults_to_configured_test_split(monkeypatch, tmp_path):
     assert summary["evaluated_split"] == "test"
     with pytest.raises(ValueError, match="train_path"):
         evaluate_experiment(config, data_path=train)
+    copied_train = tmp_path / "copied_train.npz"
+    _write_eval_data(copied_train, 2)
+    copied_train.with_suffix(".json").write_text(
+        json.dumps({"split": "train"})
+    )
+    with pytest.raises(ValueError, match="declares split='train'"):
+        evaluate_experiment(config, data_path=copied_train)
+    unsafe = evaluate_experiment(
+        config,
+        data_path=copied_train,
+        output_dir=tmp_path / "unsafe",
+        allow_unsafe_data=True,
+    )
+    unsafe_summary = json.loads((unsafe / "summary.json").read_text())
+    assert unsafe_summary["evaluated_split"] == "explicit"

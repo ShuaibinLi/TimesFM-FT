@@ -47,7 +47,10 @@ class NpzWindowDataset(Dataset[WindowBatch]):
         if not self.path.exists():
             raise FileNotFoundError(self.path)
 
+        self.metadata = self._load_metadata(self.path)
         loaded = self._load_arrays(self.path)
+        if self.path.is_dir():
+            self._validate_bundle_integrity(loaded, self.metadata)
         contexts = np.asarray(loaded["context_values"], dtype=np.float32)
         futures = np.asarray(loaded["future_values"], dtype=np.float32)
         if contexts.ndim == 2:
@@ -126,7 +129,6 @@ class NpzWindowDataset(Dataset[WindowBatch]):
         self.dates = self._optional_vector(
             loaded.get("dates"), len(contexts), np.int32, "dates"
         )
-        self.metadata = self._load_metadata(self.path)
         self._validate_metadata(
             context_length=context_length,
             horizon_length=horizon_length,
@@ -215,6 +217,88 @@ class NpzWindowDataset(Dataset[WindowBatch]):
             raise ValueError(f"dataset metadata must be an object: {metadata_path}")
         return metadata
 
+    def _validate_bundle_integrity(
+        self,
+        arrays: dict[str, np.ndarray],
+        metadata: dict[str, Any] | None,
+    ) -> None:
+        if metadata is None:
+            raise ValueError(f"memory-mapped bundle requires manifest.json: {self.path}")
+        if metadata.get("format_version") != 1:
+            raise ValueError(
+                f"unsupported bundle format_version={metadata.get('format_version')!r}"
+            )
+        if metadata.get("format") != "timesfm-ft-npy-bundle":
+            raise ValueError(f"unsupported bundle format={metadata.get('format')!r}")
+
+        required_dtypes = {
+            "context_values": np.dtype(np.float32),
+            "future_values": np.dtype(np.float32),
+            "timestamps": np.dtype(np.int64),
+            "dates": np.dtype(np.int32),
+        }
+        for name, expected_dtype in required_dtypes.items():
+            if name not in arrays:
+                raise ValueError(f"bundle is missing required array {name}.npy")
+            if arrays[name].dtype != expected_dtype:
+                raise ValueError(
+                    f"{name} dtype={arrays[name].dtype}, expected {expected_dtype}"
+                )
+        for name in ("context_mask", "future_mask"):
+            if name in arrays and arrays[name].dtype != np.dtype(np.bool_):
+                raise ValueError(f"{name} dtype must be bool")
+
+        samples = int(metadata.get("samples", -1))
+        if samples < 0:
+            raise ValueError("manifest samples must be non-negative")
+        for name, array in arrays.items():
+            if array.shape[0] != samples:
+                raise ValueError(
+                    f"{name} sample count={array.shape[0]}, manifest={samples}"
+                )
+
+        schema = metadata.get("schema")
+        if not isinstance(schema, dict):
+            raise ValueError("manifest schema must be an object")
+        for name, expected_dtype in required_dtypes.items():
+            expected_schema = [str(expected_dtype), *arrays[name].shape]
+            if schema.get(name) != expected_schema:
+                raise ValueError(
+                    f"manifest schema for {name}={schema.get(name)!r}, "
+                    f"expected {expected_schema!r}"
+                )
+
+        dates = arrays["dates"]
+        date_values, counts = np.unique(dates, return_counts=True)
+        date_counts = {
+            str(int(day)): int(count)
+            for day, count in zip(date_values, counts, strict=True)
+        }
+        manifest_counts = metadata.get("samples_by_day")
+        if manifest_counts != date_counts:
+            raise ValueError("manifest samples_by_day does not match dates.npy")
+        unique_dates = sorted(date_counts)
+        if metadata.get("date_count") != len(unique_dates):
+            raise ValueError("manifest date_count does not match dates.npy")
+        if not unique_dates:
+            raise ValueError("bundle contains no dates")
+        if metadata.get("first_date") != unique_dates[0]:
+            raise ValueError("manifest first_date does not match dates.npy")
+        if metadata.get("last_date") != unique_dates[-1]:
+            raise ValueError("manifest last_date does not match dates.npy")
+
+        session = metadata.get("session")
+        expected_session = {
+            "timezone": "America/New_York",
+            "start": "09:30:00",
+            "end": "16:15:00",
+            "early_closes_allowed": True,
+        }
+        if session != expected_session:
+            raise ValueError(
+                f"manifest session={session!r}, expected {expected_session!r}"
+            )
+
     def _validate_metadata(
         self,
         *,
@@ -232,7 +316,18 @@ class NpzWindowDataset(Dataset[WindowBatch]):
             raise ValueError(f"dataset metadata is required for {self.path}")
         if require_metadata and (self.timestamps is None or self.dates is None):
             raise ValueError(f"timestamps and dates are required for {self.path}")
-        if self.metadata is not None:
+        validate_claims = require_metadata or any(
+            value is not None
+            for value in (
+                sampling_interval_seconds,
+                expected_stride,
+                expected_product,
+                expected_split,
+                expected_dates,
+                expected_dates_path,
+            )
+        )
+        if self.metadata is not None and validate_claims:
             expected = {
                 "context_length": context_length,
                 "horizon_length": horizon_length,

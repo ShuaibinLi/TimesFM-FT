@@ -44,6 +44,14 @@ class ForecastMetricsAccumulator:
         current_price: torch.Tensor,
         target_mask: torch.Tensor,
     ) -> None:
+        valid_tensor = ~target_mask.bool()
+        if not torch.isfinite(current_price).all().item():
+            raise ValueError("current_price contains non-finite values")
+        if not torch.isfinite(targets[valid_tensor]).all().item():
+            raise ValueError("valid targets contain non-finite values")
+        prediction_valid = valid_tensor[:, :, None].expand_as(predictions)
+        if not torch.isfinite(predictions[prediction_valid]).all().item():
+            raise ValueError("valid predictions contain non-finite values")
         prediction_values = predictions.detach().float().cpu().numpy()
         target_values = targets.detach().float().cpu().numpy()
         origins = current_price.detach().float().cpu().numpy()[:, None]

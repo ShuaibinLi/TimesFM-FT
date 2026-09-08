@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 
 from timesfm_ft.data import NpzWindowDataset
 
@@ -35,11 +36,11 @@ def test_build_split_reads_multiple_parts_and_writes_audited_bundle(tmp_path):
         datetime(2025, 1, 2, 9, 30, tzinfo=ZoneInfo("America/New_York")).timestamp()
         * 1_000_000_000
     )
-    timestamps = start + np.arange(22_000, dtype=np.int64) * 500_000_000
-    wmp = 110.0 + np.arange(22_000, dtype=np.float64) * 0.0001
+    timestamps = start + np.arange(25_200, dtype=np.int64) * 500_000_000
+    wmp = 110.0 + np.arange(25_200, dtype=np.float64) * 0.0001
     table = pa.table({"timestamp_ns": timestamps, "wmp": wmp})
-    pq.write_table(table.slice(0, 11_000), partition / "part0.parquet")
-    pq.write_table(table.slice(11_000), partition / "part1.parquet")
+    pq.write_table(table.slice(0, 12_600), partition / "part0.parquet")
+    pq.write_table(table.slice(12_600), partition / "part1.parquet")
     date_file = tmp_path / "dates-train.txt"
     date_file.write_text(f"{day}\n")
     destination = tmp_path / "train_c16_h8"
@@ -69,6 +70,24 @@ def test_build_split_reads_multiple_parts_and_writes_audited_bundle(tmp_path):
         expected_dates_path=date_file,
         require_metadata=True,
     )
-    assert len(dataset) == len(range(15, 21_992, 8))
+    assert len(dataset) == len(range(15, 25_192, 8))
     assert dataset.metadata is not None
     assert dataset.metadata["date_file_sha256"]
+
+
+def test_session_validation_rejects_truncated_open():
+    module = _module()
+    start = int(
+        datetime(2025, 1, 2, 12, 0, tzinfo=ZoneInfo("America/New_York")).timestamp()
+        * 1_000_000_000
+    )
+    timestamps = start + np.arange(21_600, dtype=np.int64) * 500_000_000
+    with pytest.raises(ValueError, match="starts too late"):
+        module._validate_day(
+            timestamps,
+            np.ones(len(timestamps)),
+            product="ZN",
+            day="20250102",
+            interval_ns=500_000_000,
+            minimum_rows=320,
+        )

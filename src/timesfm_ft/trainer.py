@@ -271,7 +271,9 @@ def _write_history(path: Path, history: Iterable[dict[str, Any]]) -> None:
     temporary = path.with_suffix(f"{path.suffix}.tmp")
     with temporary.open("w", encoding="utf-8") as handle:
         for record in history:
-            handle.write(json.dumps(record, sort_keys=True) + "\n")
+            handle.write(
+                json.dumps(record, sort_keys=True, allow_nan=False) + "\n"
+            )
     os.replace(temporary, path)
 
 

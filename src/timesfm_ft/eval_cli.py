@@ -30,6 +30,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Configured split to evaluate (default: test when available).",
     )
     parser.add_argument(
+        "--unsafe-data",
+        action="store_true",
+        help="Allow explicit --data without val/test provenance metadata.",
+    )
+    parser.add_argument(
         "--output-dir",
         help="Metric output directory. Defaults to trainer.output_dir/evaluation.",
     )
@@ -44,7 +49,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
-    args = build_parser().parse_args()
+    parser = build_parser()
+    args = parser.parse_args()
+    if args.unsafe_data and args.data is None:
+        parser.error("--unsafe-data requires --data")
     logging.basicConfig(
         level=getattr(logging, args.log_level),
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -58,6 +66,7 @@ def main() -> None:
         batch_size=args.batch_size,
         device_name=args.device,
         split=args.split,
+        allow_unsafe_data=args.unsafe_data,
     )
     logging.getLogger(__name__).info("artifacts=%s", destination)
 

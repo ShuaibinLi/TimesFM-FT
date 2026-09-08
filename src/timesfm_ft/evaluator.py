@@ -6,7 +6,7 @@ import csv
 import json
 import logging
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import torch
 from torch.utils.data import DataLoader
@@ -41,6 +41,17 @@ def _move_batch(batch: WindowBatch, device: torch.device) -> WindowBatch:
     }
 
 
+def _read_dataset_metadata(path: Path) -> dict[str, Any] | None:
+    metadata_path = path / "manifest.json" if path.is_dir() else path.with_suffix(".json")
+    if not metadata_path.exists():
+        return None
+    with metadata_path.open(encoding="utf-8") as handle:
+        metadata = json.load(handle)
+    if not isinstance(metadata, dict):
+        raise ValueError(f"dataset metadata must be an object: {metadata_path}")
+    return metadata
+
+
 def evaluate_experiment(
     config: ExperimentConfig,
     *,
@@ -50,6 +61,7 @@ def evaluate_experiment(
     batch_size: int | None = None,
     device_name: str | None = None,
     split: Literal["val", "test"] | None = None,
+    allow_unsafe_data: bool = False,
 ) -> Path:
     """Loads the official model, optionally applies an adapter, and evaluates."""
 
@@ -60,11 +72,31 @@ def evaluate_experiment(
     selected_split: Literal["val", "test"] | None
     if data_path is not None:
         selected_path = Path(data_path)
-        selected_split = None
         if selected_path.resolve() == Path(config.data.train_path).resolve():
             raise ValueError("evaluation on data.train_path is not allowed")
-        expected_dates = None
-        expected_dates_path = None
+        metadata = _read_dataset_metadata(selected_path)
+        if allow_unsafe_data:
+            selected_split = None
+            expected_dates = None
+            expected_dates_path = None
+        else:
+            if metadata is None:
+                raise ValueError(
+                    "explicit evaluation data requires metadata; "
+                    "pass --unsafe-data to bypass provenance checks"
+                )
+            declared_split = metadata.get("split")
+            if declared_split not in {"val", "test"}:
+                raise ValueError(
+                    f"explicit evaluation data declares split={declared_split!r}; "
+                    "only val/test are allowed"
+                )
+            selected_split = declared_split
+            if selected_split == "test":
+                expected_dates_path = config.data.test_dates_path
+            else:
+                expected_dates_path = config.data.val_dates_path
+            expected_dates = _read_expected_dates(expected_dates_path)
     else:
         selected_split = split or ("test" if config.data.test_path else "val")
         if selected_split == "test":
@@ -82,13 +114,28 @@ def evaluate_experiment(
         context_length=config.data.context_length,
         horizon_length=config.data.horizon_length,
         max_variates=config.data.max_variates,
-        sampling_interval_seconds=config.data.sampling_interval_seconds,
-        expected_stride=config.data.stride,
-        expected_product=config.data.product,
+        sampling_interval_seconds=(
+            None
+            if data_path is not None and allow_unsafe_data
+            else config.data.sampling_interval_seconds
+        ),
+        expected_stride=(
+            None
+            if data_path is not None and allow_unsafe_data
+            else config.data.stride
+        ),
+        expected_product=(
+            None
+            if data_path is not None and allow_unsafe_data
+            else config.data.product
+        ),
         expected_split=selected_split,
         expected_dates=expected_dates,
         expected_dates_path=expected_dates_path,
-        require_metadata=config.data.require_metadata and selected_split is not None,
+        require_metadata=(
+            config.data.require_metadata
+            or (data_path is not None and not allow_unsafe_data)
+        ),
     )
     loader = DataLoader(
         dataset,
@@ -149,7 +196,7 @@ def evaluate_experiment(
     destination = Path(output_dir or Path(config.trainer.output_dir) / "evaluation")
     destination.mkdir(parents=True, exist_ok=True)
     with (destination / "summary.json").open("w", encoding="utf-8") as handle:
-        json.dump(summary, handle, indent=2, sort_keys=True)
+        json.dump(summary, handle, indent=2, sort_keys=True, allow_nan=False)
     with (destination / "per_horizon.csv").open(
         "w", encoding="utf-8", newline=""
     ) as handle:

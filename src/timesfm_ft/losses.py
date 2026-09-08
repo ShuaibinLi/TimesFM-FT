@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import math
 
 import torch
 import torch.nn.functional as F
@@ -37,11 +38,20 @@ class ForecastLoss(nn.Module):
         huber_delta_ticks: float = 1.0,
     ) -> None:
         super().__init__()
-        if tick_size <= 0:
+        if not math.isfinite(tick_size) or tick_size <= 0:
             raise ValueError("tick_size must be positive")
+        if not math.isfinite(huber_delta_ticks) or huber_delta_ticks <= 0:
+            raise ValueError("huber_delta_ticks must be positive")
+        weights = (pinball_weight, median_huber_weight, crossing_weight)
+        if any(not math.isfinite(weight) or weight < 0 for weight in weights):
+            raise ValueError("loss weights must be finite and non-negative")
         quantile_tensor = torch.tensor(quantiles, dtype=torch.float32)
         if quantile_tensor.ndim != 1 or quantile_tensor.numel() == 0:
             raise ValueError("quantiles must be a non-empty sequence")
+        if not torch.isfinite(quantile_tensor).all() or not torch.all(
+            (quantile_tensor > 0) & (quantile_tensor < 1)
+        ):
+            raise ValueError("quantiles must be finite and in (0, 1)")
         if not torch.all(quantile_tensor[1:] > quantile_tensor[:-1]):
             raise ValueError("quantiles must be strictly increasing")
         self.register_buffer("quantiles_tensor", quantile_tensor, persistent=False)
@@ -115,10 +125,8 @@ class ForecastLoss(nn.Module):
             valid[:, :, None].expand_as(pinball_values),
         )
 
-        # P50 点预测稳定性。主要是希望所有 quantile 都合理，P50 特别准确。
-        # 所以 Pinball 负责整体概率分布，Huber 对 P50 额外加权。
-        # Huber loss 在误差小于 1 tick 时使用平方损失，大于 1 tick 时退化为线性损失。
-        # 单独使用 Pinball 时，P50 基本是 MAE：零点不平滑，对小误差缺少精细校正。
+        # P50 gets smooth point-forecast supervision: quadratic below the
+        # configured tick threshold and linear for larger errors.
         median_values = F.huber_loss(
             prediction_ticks[:, :, self.median_index],
             target_ticks,
@@ -127,8 +135,7 @@ class ForecastLoss(nn.Module):
         )
         median_huber = _masked_mean(median_values, valid)
 
-        # 分位数顺序错误
-        # 只比较相邻 quantile 即可，单步成立整体成立
+        # Adjacent ordering is sufficient to enforce global quantile ordering.
         crossing_values = F.relu(
             prediction_ticks[:, :, :-1] - prediction_ticks[:, :, 1:]
         )

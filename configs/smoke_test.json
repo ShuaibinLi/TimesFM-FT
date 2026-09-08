@@ -49,7 +49,7 @@
     "gradient_accumulation_steps": 1,
     "log_every_steps": 1,
     "seed": 42,
-    "device": "mps",
+    "device": "auto",
     "dtype": "float32"
   }
 }

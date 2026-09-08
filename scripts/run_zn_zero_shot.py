@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare June 2025 ZN WMP windows and evaluate TimesFM 3 zero-shot."""
+"""Evaluate and visualize TimesFM 3 zero-shot forecasts on audited ZN WMP."""
 
 from __future__ import annotations
 
@@ -29,10 +29,6 @@ from timesfm_ft.trainer import resolve_device
 
 LOGGER = logging.getLogger("zn_zero_shot")
 plt.switch_backend("Agg")
-DEFAULT_SOURCE = (
-    "gs://vatic-tmp-30d/shuaibin.li/timesfm_ft/"
-    "wmp_500ms_202506_v2/ZN"
-)
 
 
 def _write_csv(path: Path, rows: list[dict[str, object]]) -> None:
@@ -128,7 +124,7 @@ def prepare_windows(
         "samples_by_day": samples_by_day,
     }
     output_path.with_suffix(".json").write_text(
-        json.dumps(metadata, indent=2, sort_keys=True) + "\n",
+        json.dumps(metadata, indent=2, sort_keys=True, allow_nan=False) + "\n",
         encoding="utf-8",
     )
     LOGGER.info(
@@ -254,7 +250,7 @@ def _plot_horizons(rows: list[dict[str, object]], destination: Path) -> None:
         ylabel="Directional accuracy",
         ylim=(0.0, 1.0),
     )
-    figure.suptitle("ZN WMP zero-shot TimesFM 3 · June 2025")
+    figure.suptitle("ZN WMP zero-shot TimesFM 3")
     figure.tight_layout()
     figure.savefig(destination, dpi=160)
     plt.close(figure)
@@ -275,7 +271,7 @@ def _plot_daily(rows: list[dict[str, object]], destination: Path) -> None:
     axes[1].plot(x, direction, marker="o")
     axes[1].axhline(0.5, color="black", linewidth=0.8)
     axes[1].set(
-        xlabel="June 2025 trade date (MMDD)",
+        xlabel="Trade date (MMDD)",
         ylabel=f"{horizon_seconds:g}s directional accuracy",
         ylim=(0.0, 1.0),
         xticks=x,
@@ -499,17 +495,42 @@ def evaluate(
     *,
     stride: int,
     max_samples: int | None,
+    split: str | None,
 ) -> None:
     config.validate()
+    expected_dates_path = (
+        config.data.test_dates_path
+        if split == "test"
+        else config.data.val_dates_path
+        if split == "val"
+        else None
+    )
+    expected_dates = (
+        {
+            int(line)
+            for line in Path(expected_dates_path).read_text().splitlines()
+            if line
+        }
+        if expected_dates_path is not None
+        else None
+    )
     dataset = NpzWindowDataset(
         data_path,
         context_length=config.data.context_length,
         horizon_length=config.data.horizon_length,
         max_variates=1,
+        sampling_interval_seconds=config.data.sampling_interval_seconds,
+        expected_stride=config.data.stride,
+        expected_product=config.data.product,
+        expected_split=split,
+        expected_dates=expected_dates,
+        expected_dates_path=expected_dates_path,
+        require_metadata=config.data.require_metadata and split is not None,
     )
-    archive = np.load(data_path, allow_pickle=False)
-    dates = np.asarray(archive["dates"])
-    timestamps = np.asarray(archive["timestamps"])
+    if dataset.dates is None or dataset.timestamps is None:
+        raise ValueError("zero-shot plotting requires dates and timestamps")
+    dates = np.asarray(dataset.dates)
+    timestamps = np.asarray(dataset.timestamps)
     indices = np.arange(len(dataset))
     if max_samples is not None and max_samples < len(dataset):
         indices = np.linspace(0, len(dataset) - 1, max_samples, dtype=np.int64)
@@ -621,7 +642,7 @@ def evaluate(
     )
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "summary.json").write_text(
-        json.dumps(summary, indent=2, sort_keys=True) + "\n",
+        json.dumps(summary, indent=2, sort_keys=True, allow_nan=False) + "\n",
         encoding="utf-8",
     )
     _write_csv(output_dir / "per_horizon.csv", horizon_rows)
@@ -675,7 +696,10 @@ def evaluate(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="configs/zn_zero_shot.json")
-    parser.add_argument("--source-root", default=DEFAULT_SOURCE)
+    parser.add_argument(
+        "--source-root",
+        help="Optional raw Parquet root; omitted uses the configured test bundle.",
+    )
     parser.add_argument("--data")
     parser.add_argument("--output-dir")
     parser.add_argument(
@@ -694,25 +718,42 @@ def main() -> None:
     stride = args.stride or config.data.horizon_length
     if stride <= 0:
         parser.error("--stride must be positive")
-    data_path = Path(args.data or config.data.val_path)
+    configured_path = config.data.test_path or config.data.val_path
+    data_path = Path(args.data or configured_path)
+    split = (
+        "test"
+        if config.data.test_path and data_path.resolve() == Path(config.data.test_path).resolve()
+        else "val"
+        if data_path.resolve() == Path(config.data.val_path).resolve()
+        else None
+    )
     output_dir = Path(
         args.output_dir or Path(config.trainer.output_dir) / "evaluation"
     )
-    data_path = prepare_windows(
-        args.source_root,
-        data_path,
-        context_length=config.data.context_length,
-        horizon_length=config.data.horizon_length,
-        stride=stride,
-        interval_ns=int(config.data.sampling_interval_seconds * 1_000_000_000),
-        force=args.force_data,
-    )
+    if args.source_root is not None:
+        if args.data is None:
+            parser.error("--source-root requires --data for generated NPZ output")
+        data_path = prepare_windows(
+            args.source_root,
+            data_path,
+            context_length=config.data.context_length,
+            horizon_length=config.data.horizon_length,
+            stride=stride,
+            interval_ns=int(
+                config.data.sampling_interval_seconds * 1_000_000_000
+            ),
+            force=args.force_data,
+        )
+        split = None
+    elif args.force_data:
+        parser.error("--force-data requires --source-root")
     evaluate(
         config,
         data_path,
         output_dir,
         stride=stride,
         max_samples=args.max_samples,
+        split=split,
     )
 
 

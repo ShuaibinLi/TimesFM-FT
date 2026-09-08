@@ -18,6 +18,8 @@ from timesfm_ft.config import ExperimentConfig, ModelConfig
 from timesfm_ft.data import NpzWindowDataset
 from timesfm_ft.losses import ForecastLoss
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -32,11 +34,17 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    config = ExperimentConfig.from_json(args.config)
+    config_path = Path(args.config)
+    if not config_path.is_absolute():
+        config_path = REPO_ROOT / config_path
+    checkpoint_path = Path(args.checkpoint)
+    if not checkpoint_path.is_absolute():
+        checkpoint_path = REPO_ROOT / checkpoint_path
+    config = ExperimentConfig.from_json(config_path)
     config = dataclasses.replace(
         config,
         model=ModelConfig(
-            checkpoint=str(Path(args.checkpoint).resolve()),
+            checkpoint=str(checkpoint_path.resolve()),
             disable_linear_detrending=config.model.disable_linear_detrending,
         ),
         trainer=dataclasses.replace(

@@ -19,6 +19,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 LOGGER = logging.getLogger("prepare_single_product_splits")
+REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SOURCE_ROOT = (
     "gs://vatic-hft-user-data/shuaibin.li/timesfm_ft/"
     "wmp_500ms_20221101_20260130"
@@ -27,7 +28,8 @@ SPLITS = ("train", "val", "test")
 SESSION_TIMEZONE = ZoneInfo("America/New_York")
 SESSION_OPEN = time(9, 30)
 SESSION_CLOSE = time(16, 15)
-MIN_SESSION_DURATION_SECONDS = 3 * 60 * 60
+EARLY_CLOSE = time(13, 0)
+SESSION_BOUNDARY_TOLERANCE_SECONDS = 30
 
 
 def _read_dates(path: Path) -> list[str]:
@@ -141,9 +143,34 @@ def _validate_day(
         raise ValueError(f"{product} {day} starts outside the RTH session: {first}")
     if last.time() > SESSION_CLOSE:
         raise ValueError(f"{product} {day} ends after the RTH session: {last}")
-    if (last - first).total_seconds() < MIN_SESSION_DURATION_SECONDS:
+    session_open = datetime.combine(
+        expected_date,
+        SESSION_OPEN,
+        tzinfo=SESSION_TIMEZONE,
+    )
+    if (first - session_open).total_seconds() > SESSION_BOUNDARY_TOLERANCE_SECONDS:
+        raise ValueError(f"{product} {day} starts too late for RTH: {first}")
+    normal_close = datetime.combine(
+        expected_date,
+        SESSION_CLOSE,
+        tzinfo=SESSION_TIMEZONE,
+    )
+    early_close = datetime.combine(
+        expected_date,
+        EARLY_CLOSE,
+        tzinfo=SESSION_TIMEZONE,
+    )
+    near_normal_close = (
+        abs((last - normal_close).total_seconds())
+        <= SESSION_BOUNDARY_TOLERANCE_SECONDS
+    )
+    near_early_close = (
+        abs((last - early_close).total_seconds())
+        <= SESSION_BOUNDARY_TOLERANCE_SECONDS
+    )
+    if not (near_normal_close or near_early_close):
         raise ValueError(
-            f"{product} {day} session is unexpectedly short: {first}..{last}"
+            f"{product} {day} has an unrecognized RTH close: {last}"
         )
 
 
@@ -309,8 +336,16 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--product", choices=("ZN", "ES", "all"), default="all")
     parser.add_argument("--source-root", default=DEFAULT_SOURCE_ROOT)
-    parser.add_argument("--split-dir", type=Path, default=Path("configs/splits"))
-    parser.add_argument("--output-root", type=Path, default=Path("data"))
+    parser.add_argument(
+        "--split-dir",
+        type=Path,
+        default=REPO_ROOT / "configs" / "splits",
+    )
+    parser.add_argument(
+        "--output-root",
+        type=Path,
+        default=REPO_ROOT / "data",
+    )
     parser.add_argument("--context-length", type=int, default=256)
     parser.add_argument("--horizon-length", type=int, default=64)
     parser.add_argument("--stride", type=int, default=64)

@@ -60,3 +60,21 @@ def test_all_masked_batch_is_rejected():
             current_price=torch.ones(1),
             target_mask=torch.ones(1, 1, dtype=torch.bool),
         )
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"quantiles": [0.0, 0.5, 0.9]}, "in \\(0, 1\\)"),
+        ({"quantiles": [0.1, 0.5, 1.0]}, "in \\(0, 1\\)"),
+        ({"quantiles": [0.1, float("nan"), 0.9]}, "finite"),
+        (
+            {"quantiles": [0.1, 0.5, 0.9], "huber_delta_ticks": 0.0},
+            "huber_delta_ticks",
+        ),
+    ],
+)
+def test_loss_rejects_invalid_parameters(kwargs, message):
+    kwargs.setdefault("tick_size", 0.01)
+    with pytest.raises(ValueError, match=message):
+        ForecastLoss(**kwargs)

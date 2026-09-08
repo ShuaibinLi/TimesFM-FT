@@ -70,12 +70,31 @@ def test_loads_memory_mapped_bundle_and_validates_metadata(tmp_path):
     (bundle / "manifest.json").write_text(
         json.dumps(
             {
+                "format": "timesfm-ft-npy-bundle",
+                "format_version": 1,
                 "product": "ZN",
                 "split": "train",
                 "context_length": 16,
                 "horizon_length": 6,
                 "stride": 1,
                 "sampling_interval_seconds": 0.000001,
+                "samples": 3,
+                "schema": {
+                    "context_values": ["float32", 3, 16],
+                    "future_values": ["float32", 3, 6],
+                    "timestamps": ["int64", 3],
+                    "dates": ["int32", 3],
+                },
+                "samples_by_day": {"20250102": 3},
+                "date_count": 1,
+                "first_date": "20250102",
+                "last_date": "20250102",
+                "session": {
+                    "timezone": "America/New_York",
+                    "start": "09:30:00",
+                    "end": "16:15:00",
+                    "early_closes_allowed": True,
+                },
             }
         )
     )
@@ -127,3 +146,32 @@ def test_rejects_metadata_mismatch(tmp_path):
             expected_product="ZN",
             require_metadata=False,
         )
+
+
+@pytest.mark.parametrize(
+    ("manifest", "context_dtype", "message"),
+    [
+        ({"format": "wrong", "format_version": 1}, np.float32, "bundle format"),
+        (
+            {"format": "timesfm-ft-npy-bundle", "format_version": 1},
+            np.float64,
+            "context_values dtype",
+        ),
+    ],
+)
+def test_bundle_rejects_invalid_manifest_or_dtype(
+    tmp_path, manifest, context_dtype, message
+):
+    bundle = tmp_path / message.replace(" ", "_")
+    bundle.mkdir()
+    arrays = {
+        "context_values": np.ones((2, 16), dtype=context_dtype),
+        "future_values": np.ones((2, 6), dtype=np.float32),
+        "timestamps": np.arange(2, dtype=np.int64),
+        "dates": np.full(2, 20250102, dtype=np.int32),
+    }
+    for name, value in arrays.items():
+        np.save(bundle / f"{name}.npy", value)
+    (bundle / "manifest.json").write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match=message):
+        NpzWindowDataset(bundle, context_length=16, horizon_length=6)

@@ -1,15 +1,22 @@
 {
   "data": {
-    "train_path": "../data/zn-wmp-500ms/eval_c256_h64.npz",
-    "val_path": "../data/zn-wmp-500ms/eval_c256_h64.npz",
+    "train_path": "../data/zn-wmp-500ms/splits/train_c256_h64",
+    "val_path": "../data/zn-wmp-500ms/splits/val_c256_h64",
+    "test_path": "../data/zn-wmp-500ms/splits/test_c256_h64",
+    "product": "ZN",
     "context_length": 256,
     "horizon_length": 64,
+    "stride": 64,
     "sampling_interval_seconds": 0.5,
     "max_variates": 1,
+    "train_dates_path": "splits/dates-train.txt",
+    "val_dates_path": "splits/dates-val.txt",
+    "test_dates_path": "splits/dates-test.txt",
+    "require_metadata": true,
     "eval_only": true
   },
   "model": {
-    "checkpoint": "../../timesfm-3.0-pytorch",
+    "checkpoint": "google/timesfm-3.0-pytorch",
     "disable_linear_detrending": false
   },
   "adapter": {
