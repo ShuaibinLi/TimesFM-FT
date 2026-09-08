@@ -12,8 +12,8 @@ from typing import Any, Literal
 class DataConfig:
     train_path: str
     val_path: str
-    context_length: int = 512
-    horizon_length: int = 60
+    context_length: int = 256
+    horizon_length: int = 64
     max_variates: int = 32
     sampling_interval_seconds: float = 0.5
 

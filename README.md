@@ -1,10 +1,11 @@
 # TimesFM-FT
 
-Research fine-tuning toolkit for TimesFM 3, initially focused on 500 ms
-weighted-mid forecasting.
+Research fine-tuning toolkit for TimesFM 3, focused on weighted-mid forecasting
+with one data point every 500 ms.
 
 The first supported task uses a historical context window to predict the next
-60 points (30 seconds) of one weighted-mid target. Two aligned input contracts
+64 points (32 seconds) of one weighted-mid target from 256 context points
+(128 seconds). Two aligned input contracts
 are supported:
 
 1. single input: weighted-mid history only;
@@ -100,7 +101,8 @@ timestamps:   int64[S]                     # retained for auditing, not training
 
 Conventions:
 
-- `C=512` and `H=60` in the initial configs;
+- every adjacent data point is exactly 500 ms apart;
+- `C=256` (128 seconds) and `H=64` (32 seconds) in the production configs;
 - variate zero must always be weighted-mid;
 - `V=1` for the single-input route and `1<V<=32` for the multi-input route;
 - variates `1..V-1` are past-only covariates;
@@ -146,6 +148,10 @@ Then run one head-only epoch for each input route:
 timesfm-ft --config configs/smoke_test.json
 timesfm-ft --config configs/smoke_test_multi.json
 ```
+
+The smoke configs intentionally keep `C=32` and `H=16` to test plumbing
+quickly; they are not experiment configs. All production experiment configs
+use the 500 ms, `C=256` (128 seconds), `H=64` (32 seconds) contract.
 
 ## Train
 
@@ -201,7 +207,7 @@ Evaluation writes:
 ```text
 evaluation/
 ├── summary.json       # overall point, baseline, and probabilistic metrics
-└── per_horizon.csv    # metrics from 0.5s through 30s
+└── per_horizon.csv    # metrics from 0.5s through 32s
 ```
 
 Reported metrics include P50 MAE/RMSE in ticks, persistence RMSE, out-of-sample

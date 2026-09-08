@@ -5,7 +5,11 @@ description = "Research fine-tuning toolkit for TimesFM 3."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+  "fsspec>=2025.9",
+  "gcsfs>=2025.9",
+  "matplotlib>=3.8",
   "numpy>=1.26",
+  "pyarrow>=14",
   "torch>=2.1",
   "huggingface-hub>=0.28",
   "safetensors>=0.5",

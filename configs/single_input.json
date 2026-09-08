@@ -2,8 +2,8 @@
   "data": {
     "train_path": "data/single/train.npz",
     "val_path": "data/single/val.npz",
-    "context_length": 512,
-    "horizon_length": 60,
+    "context_length": 256,
+    "horizon_length": 64,
     "sampling_interval_seconds": 0.5,
     "max_variates": 1
   },

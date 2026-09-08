@@ -1,0 +1,33 @@
+{
+  "data": {
+    "train_path": "data/zn-wmp-500ms/eval_c256_h64.npz",
+    "val_path": "data/zn-wmp-500ms/eval_c256_h64.npz",
+    "context_length": 256,
+    "horizon_length": 64,
+    "sampling_interval_seconds": 0.5,
+    "max_variates": 1
+  },
+  "model": {
+    "checkpoint": "../timesfm-3.0-pytorch",
+    "disable_linear_detrending": false
+  },
+  "adapter": {
+    "type": "head",
+    "last_n_layers": 1,
+    "rank": 1,
+    "alpha": 1.0,
+    "dropout": 0.0
+  },
+  "objective": {
+    "tick_size": 0.015625
+  },
+  "trainer": {
+    "output_dir": "outputs/zn-zero-shot-c256-h64",
+    "epochs": 1,
+    "batch_size": 32,
+    "num_workers": 0,
+    "log_every_steps": 25,
+    "device": "cuda",
+    "dtype": "float32"
+  }
+}
