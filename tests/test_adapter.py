@@ -127,6 +127,36 @@ def test_lora_is_initially_output_preserving_and_trainable(tmp_path):
         torch.testing.assert_close(actual[name], expected[name])
 
 
+def test_lora_backward_is_finite_for_constant_input_patches():
+    torch.manual_seed(13)
+    backbone = make_tiny_model()
+    names = configure_tuning(
+        backbone,
+        mode="lora",
+        last_n_layers=1,
+        lora_rank=4,
+        lora_alpha=8.0,
+        lora_dropout=0.0,
+    )
+    adapter = TimesFM3Adapter(
+        backbone,
+        tuning_mode="lora",
+        trainable_names=names,
+    )
+    context = torch.full((2, 1, 16), 110.0)
+    prepared = adapter._prepare_decode_inputs(
+        context,
+        horizon=6,
+        context_mask=None,
+    )
+    torch.testing.assert_close(prepared["target"][:, :, -1], context[:, :, -1])
+    prediction = adapter(context, horizon=6)
+    prediction.sum().backward()
+    for name, parameter in adapter.named_parameters():
+        if parameter.requires_grad and parameter.grad is not None:
+            assert torch.isfinite(parameter.grad).all(), name
+
+
 def test_forecast_loss_is_zero_for_perfect_ordered_forecast():
     target = torch.tensor([[100.0, 100.01]])
     predictions = target[:, :, None].repeat(1, 1, 3)

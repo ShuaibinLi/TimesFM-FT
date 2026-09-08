@@ -30,10 +30,11 @@ def test_product_configs_use_hardened_training_contract():
         assert config.data.stride == 64
         assert config.data.sampling_interval_seconds == 0.5
         assert config.objective.tick_size == tick_size
+        assert config.model.disable_iterative_cpm_revin
         assert config.trainer.batch_size == 32
         assert config.trainer.gradient_accumulation_steps == 2
         assert config.trainer.deterministic
-        assert config.trainer.dtype == "float32"
+        assert config.trainer.dtype == "bfloat16"
         assert config.trainer.early_stopping_patience == 2
         assert config.trainer.checkpoint_metric == "rmse_ticks"
 

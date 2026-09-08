@@ -30,6 +30,7 @@ class DataConfig:
 class ModelConfig:
     checkpoint: str = "google/timesfm-3.0-pytorch"
     disable_linear_detrending: bool = False
+    disable_iterative_cpm_revin: bool = False
 
 
 @dataclasses.dataclass(frozen=True)

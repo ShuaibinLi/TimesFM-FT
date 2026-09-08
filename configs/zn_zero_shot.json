@@ -17,7 +17,8 @@
   },
   "model": {
     "checkpoint": "google/timesfm-3.0-pytorch",
-    "disable_linear_detrending": false
+    "disable_linear_detrending": false,
+    "disable_iterative_cpm_revin": true
   },
   "adapter": {
     "type": "head",

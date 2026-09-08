@@ -189,10 +189,16 @@ def _run_epoch(
                         max_grad_norm,
                     )
                     if not torch.isfinite(gradient_norm):
+                        bad_gradients = [
+                            name
+                            for name, parameter in model.named_parameters()
+                            if parameter.grad is not None
+                            and not torch.isfinite(parameter.grad).all()
+                        ]
                         optimizer.zero_grad(set_to_none=True)
                         raise FloatingPointError(
                             f"non-finite gradient norm at epoch={epoch} "
-                            f"step={step + 1}"
+                            f"step={step + 1}; bad_gradients={bad_gradients[:10]}"
                         )
                     gradient_norm_total += float(gradient_norm.detach())
                     optimizer_updates += 1

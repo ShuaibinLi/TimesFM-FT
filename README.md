@@ -192,10 +192,12 @@ use the 500 ms, `C=256` (128 seconds), `H=64` (32 seconds) contract.
 
 ZN and ES configs already pin their actual tick sizes. Generic templates must
 set `objective.tick_size` before use. Parameters, optimizer state, and
-tick-space loss remain FP32. The adapter supports BF16 autocast without casting
-master weights, but production configs currently use FP32 compute: the pinned
-TimesFM 3 checkpoint produces non-finite attention-LoRA gradients under BF16
-on GB10, and the trainer fails closed on any non-finite loss or gradient.
+tick-space loss remain FP32; production configs use BF16 autocast for model
+compute. Differentiable adaptation disables iterative CPM-RevIN refinement,
+whose upstream `sqrt(0)` backward is undefined, and applies a few-ULP
+perturbation only to exactly constant input patches while preserving the cutoff
+value. Real-checkpoint shuffled-batch gates pass in FP32 and BF16. The trainer
+still fails closed on any non-finite loss or gradient.
 
 Single-input route:
 
@@ -378,9 +380,14 @@ The critical tests verify:
 6. partial accumulation, early stopping, atomic checkpoints, and exact resume;
 7. explicit holdout selection and adapter metadata compatibility.
 
-Before a long run, execute
-`python scripts/smoke_real_checkpoint.py --dtype float32`; it performs a
-real-checkpoint train step plus save/load/resume parity.
+Before a long run, execute:
+
+```bash
+python scripts/smoke_real_checkpoint.py \
+  --dtype bfloat16 --batch-size 64 --shuffle
+```
+
+It performs a real-checkpoint train step over randomized production windows
+plus save/load/resume parity.
 Then compare untouched zero-shot, head-only, and LoRA against persistence on
-the same test bundle. Treat BF16 as experimental until its real-checkpoint gate
-passes.
+the same test bundle.

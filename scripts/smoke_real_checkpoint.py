@@ -27,6 +27,8 @@ def main() -> None:
     parser.add_argument("--checkpoint", default="../timesfm-3.0-pytorch")
     parser.add_argument("--dtype", choices=("float32", "bfloat16"))
     parser.add_argument("--batch-size", type=int)
+    parser.add_argument("--shuffle", action="store_true")
+    parser.add_argument("--detect-anomaly", action="store_true")
     parser.add_argument(
         "--deterministic",
         action=argparse.BooleanOptionalAction,
@@ -46,6 +48,7 @@ def main() -> None:
         model=ModelConfig(
             checkpoint=str(checkpoint_path.resolve()),
             disable_linear_detrending=config.model.disable_linear_detrending,
+            disable_iterative_cpm_revin=config.model.disable_iterative_cpm_revin,
         ),
         trainer=dataclasses.replace(
             config.trainer,
@@ -76,10 +79,18 @@ def main() -> None:
     batch_size = args.batch_size or config.trainer.batch_size
     if batch_size <= 0:
         parser.error("--batch-size must be positive")
+    indices = (
+        torch.randperm(
+            len(dataset),
+            generator=torch.Generator().manual_seed(config.trainer.seed),
+        )[:batch_size].tolist()
+        if args.shuffle
+        else list(range(batch_size))
+    )
     batch = next(
         iter(
             DataLoader(
-                Subset(dataset, list(range(batch_size))),
+                Subset(dataset, indices),
                 batch_size=batch_size,
             )
         )
@@ -110,6 +121,7 @@ def main() -> None:
         warmup_ratio=0.0,
         min_lr_ratio=0.1,
     )
+    torch.autograd.set_detect_anomaly(args.detect_anomaly)
     prediction = model(
         batch["context_values"],
         horizon=config.data.horizon_length,

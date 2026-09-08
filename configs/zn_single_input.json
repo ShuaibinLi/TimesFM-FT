@@ -16,7 +16,8 @@
   },
   "model": {
     "checkpoint": "google/timesfm-3.0-pytorch",
-    "disable_linear_detrending": false
+    "disable_linear_detrending": false,
+    "disable_iterative_cpm_revin": true
   },
   "adapter": {
     "type": "lora",
@@ -57,7 +58,7 @@
     "log_every_steps": 10,
     "seed": 42,
     "device": "auto",
-    "dtype": "float32",
+    "dtype": "bfloat16",
     "deterministic": true,
     "early_stopping_patience": 2,
     "checkpoint_metric": "rmse_ticks"

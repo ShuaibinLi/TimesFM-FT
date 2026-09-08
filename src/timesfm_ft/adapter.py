@@ -175,6 +175,8 @@ class TimesFM3Adapter(nn.Module):
         backbone = TimesFM3Torch.from_pretrained(model_config.checkpoint)
         if model_config.disable_linear_detrending:
             backbone.use_linear_detrending = False
+        if model_config.disable_iterative_cpm_revin:
+            backbone.use_iterative_cpm_revin = False
         if configure_for_training:
             trainable_names = configure_tuning(
                 backbone,
@@ -304,8 +306,8 @@ class TimesFM3Adapter(nn.Module):
             all_quantiles = self.backbone.decode(**decode_kwargs)
         return all_quantiles[:, 0, :horizon, :]
 
-    @staticmethod
     def _prepare_decode_inputs(
+        self,
         context_values: torch.Tensor,
         *,
         horizon: int,
@@ -320,6 +322,10 @@ class TimesFM3Adapter(nn.Module):
         if context_mask is not None and context_mask.shape != context_values.shape:
             raise ValueError("context_mask must match context_values")
 
+        context_values = self._stabilize_constant_patches(
+            context_values,
+            context_mask,
+        )
         target = context_values[:, :1, :]
         target_mask = context_mask[:, :1, :] if context_mask is not None else None
         covariates = context_values[:, 1:, :] if context_values.shape[1] > 1 else None
@@ -335,6 +341,61 @@ class TimesFM3Adapter(nn.Module):
             "target_mask": target_mask,
             "past_only_mask": covariate_mask,
         }
+
+    def _stabilize_constant_patches(
+        self,
+        values: torch.Tensor,
+        mask: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """Avoid undefined sqrt(0) gradients in upstream running statistics.
+
+        The released inference-only model computes a per-patch standard
+        deviation with ``sqrt(var)``. Exactly constant valid patches therefore
+        have a finite forward pass but an undefined backward derivative. Add a
+        deterministic, sub-tick perturbation only to those patches, ending at
+        zero so the forecast cutoff value remains unchanged.
+        """
+
+        patch_length = int(self.backbone.input_patch_len)
+        if values.shape[-1] % patch_length != 0:
+            return values
+        patches = values.reshape(*values.shape[:-1], -1, patch_length)
+        valid = (
+            torch.ones_like(patches, dtype=torch.bool)
+            if mask is None
+            else ~mask.reshape_as(patches)
+        )
+        valid_count = valid.sum(dim=-1)
+        minimum = torch.where(valid, patches, torch.inf).amin(dim=-1)
+        maximum = torch.where(valid, patches, -torch.inf).amax(dim=-1)
+        constant = (valid_count > 1) & (minimum == maximum)
+        if not constant.any().item():
+            return values
+
+        scale = torch.where(
+            constant,
+            torch.maximum(maximum.abs(), torch.ones_like(maximum)),
+            torch.ones_like(maximum),
+        )
+        amplitude = (
+            scale
+            * torch.finfo(values.dtype).eps
+            * 4.0
+        ).detach()
+        pattern = torch.linspace(
+            -1.0,
+            0.0,
+            patch_length,
+            dtype=values.dtype,
+            device=values.device,
+        )
+        perturbation = (
+            constant[..., None]
+            * valid
+            * amplitude[..., None]
+            * pattern
+        )
+        return (patches + perturbation).reshape_as(values)
 
     def trainable_state_dict(self) -> dict[str, torch.Tensor]:
         trainable = {
@@ -354,6 +415,10 @@ class TimesFM3Adapter(nn.Module):
             "trainable_names": self.trainable_names,
             "quantiles": self.quantiles,
             "parameter_summary": self.parameter_summary,
+            "use_linear_detrending": bool(self.backbone.use_linear_detrending),
+            "use_iterative_cpm_revin": bool(
+                self.backbone.use_iterative_cpm_revin
+            ),
         }
 
     def save_adapter(
@@ -390,6 +455,10 @@ class TimesFM3Adapter(nn.Module):
             "tuning_mode": self.tuning_mode,
             "trainable_names": list(self.trainable_names),
             "quantiles": list(self.quantiles),
+            "use_linear_detrending": bool(self.backbone.use_linear_detrending),
+            "use_iterative_cpm_revin": bool(
+                self.backbone.use_iterative_cpm_revin
+            ),
         }
         for key, expected_value in expected_metadata.items():
             if metadata.get(key) != expected_value:
