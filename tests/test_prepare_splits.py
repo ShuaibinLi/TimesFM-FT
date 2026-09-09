@@ -112,7 +112,7 @@ def test_prepare_builds_audited_minute_bundle(tmp_path):
     assert sample["past_future_values"].shape == (1, 5)
     assert sample["context_mask"][1, 0]
     assert sample["context_values"][1, 1] == 0.0
-    assert sample["future_mask"].tolist() == [False, True]
+    assert sample["unknown_future_mask"][0].tolist() == [False, True]
     manifest = json.loads((destination / "manifest.json").read_text())
     assert len(manifest["source_files"]) == 2
     assert all(len(item["sha256"]) == 64 for item in manifest["source_files"])

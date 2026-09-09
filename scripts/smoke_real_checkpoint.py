@@ -14,6 +14,7 @@ import torch
 from timesfm_ft import trainer
 from timesfm_ft.adapter import TimesFM3Adapter
 from timesfm_ft.config import ExperimentConfig, ModelConfig
+from timesfm_ft.dense import build_dense_training_batch, gather_final_anchor
 from timesfm_ft.losses import BusinessForecastLoss
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -28,6 +29,7 @@ def main() -> None:
     )
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--dtype", choices=("float32", "bfloat16"), default="bfloat16")
+    parser.add_argument("--minimum-context", type=int, default=0)
     args = parser.parse_args()
     config_path = Path(args.config)
     checkpoint_path = Path(args.checkpoint)
@@ -51,6 +53,7 @@ def main() -> None:
         path=config.data.train_path,
         split="train",
         dates_path=config.data.train_dates_path,
+        for_training=True,
     )
     model = TimesFM3Adapter.from_pretrained(
         config.model,
@@ -67,7 +70,17 @@ def main() -> None:
         pin_memory=device.type == "cuda",
         generator=None,
     )
-    batch = trainer._move_batch(next(iter(loader)), device)
+    raw_batch = next(
+        (
+            candidate
+            for candidate in loader
+            if int(candidate["context_lengths"].max()) >= args.minimum_context
+        ),
+        None,
+    )
+    if raw_batch is None:
+        raise ValueError(f"no smoke batch has context >= {args.minimum_context}")
+    batch = trainer._move_batch(raw_batch, device)
     model_kwargs = {
         "horizon": config.data.horizon_length,
         "context_mask": batch["context_mask"],
@@ -86,26 +99,75 @@ def main() -> None:
     auxiliary_prediction = None
     auxiliary_target = None
     auxiliary_mask = None
-    if auxiliary_indices.numel():
+    auxiliary_anchor_mask = None
+    anchor_mask = None
+    final_prediction = None
+    business_target = batch["unknown_future_values"][:, 0]
+    business_target_mask = batch["unknown_future_mask"][:, 0]
+    eligible_dense_anchors = None
+    if config.objective.uses_dense_forward:
+        dense_batch = build_dense_training_batch(
+            batch,
+            context_min=config.data.context_min,
+            input_patch_length=int(model.backbone.input_patch_len),
+            output_patch_length=int(model.backbone.output_patch_len),
+        )
+        dense_prediction = model.forward_dense(
+            dense_batch.values,
+            masks=dense_batch.masks,
+            patch_is_target=dense_batch.patch_is_target,
+            unknown_variates=batch["context_values"].shape[1],
+        )
+        prediction = dense_prediction.target
+        target = dense_batch.target_labels
+        target_mask = dense_batch.target_label_mask
+        anchor_mask = dense_batch.eligible_anchor_mask
+        eligible_dense_anchors = int(anchor_mask.sum().item())
+        final_prediction = gather_final_anchor(
+            dense_prediction.target,
+            dense_batch.final_anchor_indices,
+        )
+        if auxiliary_indices.numel():
+            auxiliary_prediction = dense_prediction.past_only.index_select(1, auxiliary_indices)
+            auxiliary_target = dense_batch.past_only_labels.index_select(1, auxiliary_indices)
+            auxiliary_mask = dense_batch.past_only_label_mask.index_select(1, auxiliary_indices)
+            auxiliary_anchor_mask = dense_batch.eligible_anchor_mask
+    elif auxiliary_indices.numel():
         unknown_prediction = model.forward_unknown(batch["context_values"], **model_kwargs)
         prediction = unknown_prediction.target
+        target = business_target
+        target_mask = business_target_mask
         auxiliary_prediction = unknown_prediction.past_only.index_select(1, auxiliary_indices)
-        auxiliary_target = batch["past_only_future_values"].index_select(1, auxiliary_indices)
-        auxiliary_mask = batch["past_only_future_mask"].index_select(1, auxiliary_indices)
+        auxiliary_target = batch["unknown_future_values"][:, 1:].index_select(1, auxiliary_indices)
+        auxiliary_mask = batch["unknown_future_mask"][:, 1:].index_select(1, auxiliary_indices)
     else:
         prediction = model(batch["context_values"], **model_kwargs)
-    loss_scales = trainer.fit_loss_scales(dataset, config.objective)
+        target = business_target
+        target_mask = business_target_mask
+    loss_scales = trainer.fit_loss_scales(
+        dataset,
+        config.objective,
+        input_patch_length=int(model.backbone.input_patch_len),
+        output_patch_length=int(model.backbone.output_patch_len),
+        context_min=config.data.context_min,
+        batch_size=args.batch_size,
+    )
     loss = BusinessForecastLoss(
         model.quantiles,
         objective=config.objective,
         scales=loss_scales,
     ).to(device)(
         prediction,
-        batch["future_values"],
-        target_mask=batch["future_mask"],
+        target,
+        target_mask=target_mask,
+        anchor_mask=anchor_mask,
+        final_predictions=final_prediction,
+        final_targets=business_target,
+        final_target_mask=business_target_mask,
         auxiliary_predictions=auxiliary_prediction,
         auxiliary_targets=auxiliary_target,
         auxiliary_mask=auxiliary_mask,
+        auxiliary_anchor_mask=auxiliary_anchor_mask,
     )
     loss.total.backward()
     gradient_norm = torch.nn.utils.clip_grad_norm_(
@@ -122,6 +184,8 @@ def main() -> None:
         past_future_values=batch["past_future_values"],
         past_future_mask=batch["past_future_mask"],
     )
+    if final_prediction is not None:
+        torch.testing.assert_close(final_prediction, expected)
     with tempfile.TemporaryDirectory(prefix="timesfm_1min_smoke_") as temp:
         destination = Path(temp)
         model.save_adapter(destination)
@@ -147,6 +211,8 @@ def main() -> None:
                 "device": str(device),
                 "dtype": model.compute_dtype,
                 "context_shape": list(batch["context_values"].shape),
+                "context_lengths": batch["context_lengths"].tolist(),
+                "eligible_dense_anchors": eligible_dense_anchors,
                 "past_future_shape": list(batch["past_future_values"].shape),
                 "prediction_shape": list(prediction.shape),
                 "loss": float(loss.total.detach()),
@@ -156,6 +222,7 @@ def main() -> None:
                 "loss_scale_fingerprint": loss_scales.fingerprint,
                 "gradient_norm": float(gradient_norm),
                 "save_load_parity": True,
+                "dense_final_decode_parity": (True if final_prediction is not None else None),
             },
             indent=2,
         )

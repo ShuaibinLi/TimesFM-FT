@@ -2,7 +2,8 @@
 
 This repository is a research baseline for forecasting the next 64 one-minute
 returns with TimesFM 3. The active task follows
-[`timesfm3_1min_intraday_training_plan.md`](timesfm3_1min_intraday_training_plan.md).
+[`timesfm3_1min_intraday_training_plan_v1.3.md`](timesfm3_1min_intraday_training_plan_v1.3.md)
+and [`timesfm3_training_route_deep_dive.md`](timesfm3_training_route_deep_dive.md).
 
 The previous 500 ms single-variable Delta-WMP task is frozen under
 [`_archived/500ms_delta_wmp/`](_archived/500ms_delta_wmp/). The active package
@@ -22,8 +23,9 @@ does not preserve its data, config, metric, or checkpoint contracts.
 - past-future inputs: known calendar values over context plus horizon
 - session rule: no sample crosses a trade-date/session boundary
 - model budget: target + all covariates must not exceed 32 variates
-- objective: L0 target Pinball, recommended L1 cumulative-Huber extension, and
-  optional L2 selected past-only auxiliary ablation
+- training routes: F0-final deployment control, F0-all dense shifted
+  forecasting, recommended F1 final-business extension, and optional F1-MV
+  auxiliary ablation
 - split rule: chronological, whole-day train/validation/test partitions
 
 Context is dynamic. A sample with 83 real minutes is grouped into the 96-point
@@ -47,8 +49,8 @@ planned follow-up experiment.
 ```text
 configs/
 ├── datasets/intraday_1min_schema.json # source columns and frozen target semantics
-├── experiments/                    # E0-E8 matrix
-├── smoke{,_l1,_l2}.json
+├── experiments/                    # E0-E5 inputs + T0-T3 training routes
+├── smoke_t{0,1,2,3}_*.json
 └── splits/                         # chronological date lists
 scripts/
 ├── prepare_intraday_splits.py
@@ -56,12 +58,13 @@ scripts/
 ├── make_synthetic_data.py
 ├── run_baseline.py
 ├── run_train_nohup.sh
-├── run_loss_matrix_nohup.sh
+├── run_training_route_matrix_nohup.sh
 └── run_zero_shot_matrix_nohup.sh
 src/timesfm_ft/
 ├── adapter.py       # differentiable official decode + both covariate classes
 ├── data.py          # audited session bundles and dynamic context buckets
-├── losses.py        # L0/L1/L2 business objectives and train-only scales
+├── dense.py         # full-sequence tensors, shifted labels, eligible anchors
+├── losses.py        # F0/F1 route objectives and train-only scales
 ├── metrics.py       # IC/rank IC/calibration/slices/trading proxy
 ├── baselines.py     # Ridge and optional LightGBM controls
 ├── trainer.py
@@ -130,6 +133,9 @@ manifest.json
 ```
 
 Overlapping model windows are sliced lazily rather than duplicated on disk.
+At runtime, future-unknown labels use one slot-aligned tensor:
+`unknown_future_values[B, 1+V_past_only, H]`, ordered exactly like
+`context_values` as `[target | past-only]`; row zero is the business target.
 
 Feature selection is deliberately restricted to a bundle declaring
 `split=train`:
@@ -153,9 +159,31 @@ The checked-in matrix isolates one change at a time:
 - E3: E2 with `C_max=128`
 - E4: E2 with `C_max=256`
 - E5: E2 with `C_min=96`
-- E6: E2 fine-tuned with L0 target Pinball
-- E7: E2 fine-tuned with L1 = L0 + `0.3 ×` cumulative P50 Huber
-- E8: E7 + `0.05 ×` selected past-only auxiliary Pinball
+
+The matched training-route matrix is separate:
+
+- T0 / F0-final: differentiable deployment suffix decode, final Pinball
+- T1 / F0-all: public low-level full-sequence forward, dense eligible Pinball
+- T2 / F1: T1 + `0.3 ×` final-anchor cumulative P50 Huber
+- T3 / F1-MV: T2 + `0.05 ×` selected dense past-only auxiliary Pinball
+
+T1–T3 are explicitly labeled pretraining-like downstream engineering routes,
+not reconstructions of Google's unpublished recipe. They call the public
+inference-specialized Torch `forward()` with full causal sequences,
+`patch_cpm_mask=None`, explicit next-64 roll labels, and explicit eligible
+anchor masks. Linear detrending is disabled for all matched T0–T3 configs so
+the dense final token is numerically checked against deployment `decode()`.
+Validation business metrics and checkpoint selection always use deployment
+`decode()` predictions; dense final-token parity is rechecked on every
+validation batch.
+Random CPM, role reassignment, and sequence packing remain deferred research:
+the public Torch port does not expose the unpublished training branch needed
+to claim official parity.
+
+With stride-1 overlapping windows, one absolute dense origin may be supervised
+under several truncated-history views. This is intentional context
+augmentation, not extra independent data; every epoch logs eligible anchors,
+unique `(date,timestamp)` origins, and their repeat factor.
 
 Run a zero-shot experiment:
 
@@ -174,27 +202,28 @@ scripts/run_zero_shot_matrix_nohup.sh
 Only after the input ablations establish value should adaptation be run:
 
 ```bash
-scripts/run_train_nohup.sh configs/experiments/e2_past_future.json
+scripts/run_train_nohup.sh configs/experiments/t0_f0_final.json
 ```
 
 The default adaptation is head-only. Change `adapter.type` to `lora` only for a
 separate, matched experiment. The official TimesFM submodule remains unmodified.
 
-Run the gated L0 → L1 → L2 comparison under `nohup`:
+Run the gated T0 → T1 → T2 → T3 comparison under `nohup`:
 
 ```bash
-scripts/run_loss_matrix_nohup.sh
+scripts/run_training_route_matrix_nohup.sh
 ```
 
-L1 cumulative scales at 5/15/30/60 minutes and L2 feature scales are fitted
+F1 cumulative scales at 5/15/30/60 minutes and F1-MV feature scales are fitted
 only from the declared training bundle. Their values, method, date-list hash,
 feature-schema/manifest hashes, valid counts, raw estimates, explicit fallback,
 and state fingerprint are written to `loss_scales.json` and embedded in every
-checkpoint. Past-future rows are structurally excluded from the objective-facing
-`forward_unknown()` output and never enter forecast supervision.
+checkpoint. Past-future rows are structurally excluded from both
+`forward_unknown()` and `forward_dense()` objective outputs and never enter
+forecast supervision.
 
-L0 Pinball remains in the frozen target unit exactly as specified by v1.3,
-whereas L1/L2 add normalized components. Consequently `0.3` and `0.05` are
+F0 Pinball remains in the frozen target unit exactly as specified by v1.3,
+whereas F1/F1-MV add normalized components. Consequently `0.3` and `0.05` are
 unit-specific starting weights, not portable constants: changing ticks/bps/log
 units requires a new dataset ID and validation ablation.
 
@@ -247,6 +276,11 @@ fees, slippage, latency, and execution model.
 python scripts/make_synthetic_data.py
 pytest
 ruff check src tests scripts
+
+python scripts/smoke_real_checkpoint.py \
+  --config configs/smoke_t0_final.json
+python scripts/smoke_real_checkpoint.py \
+  --config configs/smoke_t3_f1_mv.json --minimum-context 96
 ```
 
 The synthetic bundle checks dynamic context, past-only/past-future routing,

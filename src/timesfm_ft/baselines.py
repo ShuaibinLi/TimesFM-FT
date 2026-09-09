@@ -98,8 +98,8 @@ def summarize_samples(
         if not np.isfinite(row).all():
             raise ValueError(f"baseline row {index} contains non-finite values")
         rows.append(row)
-        targets.append(sample["future_values"].numpy())
-        target_masks.append(sample["future_mask"].numpy())
+        targets.append(sample["unknown_future_values"][0].numpy())
+        target_masks.append(sample["unknown_future_mask"][0].numpy())
         current_names = tuple(feature_names)
         if names is None:
             names = current_names

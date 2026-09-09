@@ -21,6 +21,12 @@ class UnknownForecasts:
     past_only: torch.Tensor
 
 
+@dataclasses.dataclass(frozen=True)
+class DenseUnknownForecasts:
+    target: torch.Tensor
+    past_only: torch.Tensor
+
+
 class LoRALinear(nn.Module):
     """Low-rank update for an existing frozen Linear layer."""
 
@@ -356,6 +362,53 @@ class TimesFM3Adapter(nn.Module):
         with self._autocast_context():
             all_quantiles = self._decode_impl(self.backbone, **decode_kwargs)
         return all_quantiles[:, :, :horizon, :]
+
+    def forward_dense(
+        self,
+        values: torch.Tensor,
+        *,
+        masks: torch.Tensor,
+        patch_is_target: torch.Tensor,
+        unknown_variates: int,
+    ) -> DenseUnknownForecasts:
+        """Runs the public full-sequence forward for explicit dense training.
+
+        This is a downstream pretraining-like route, not a reconstruction of
+        Google's unpublished training branch.
+        """
+
+        if self.backbone.use_linear_detrending:
+            raise ValueError(
+                "dense training requires linear detrending disabled for "
+                "train/deploy final-token parity"
+            )
+        if values.ndim != 4 or masks.shape != values.shape:
+            raise ValueError("dense values/masks must have shape (B, V, N, P)")
+        if patch_is_target.shape != values.shape[:3]:
+            raise ValueError("patch_is_target must have shape (B, V, N)")
+        if values.shape[-1] != int(self.backbone.input_patch_len):
+            raise ValueError("dense patch length does not match backbone")
+        if not 1 <= unknown_variates <= values.shape[1]:
+            raise ValueError("invalid dense unknown variate count")
+        stable_values = self._stabilize_constant_patches(
+            values.flatten(start_dim=2),
+            masks.flatten(start_dim=2),
+        ).reshape_as(values)
+        with self._autocast_context():
+            output = self.backbone(
+                {
+                    "values": stable_values,
+                    "masks": masks,
+                    "patch_is_target": patch_is_target,
+                },
+                freeze_after=None,
+                patch_cpm_mask=None,
+            )
+        logits = output["logits"]
+        return DenseUnknownForecasts(
+            target=logits[:, 0],
+            past_only=logits[:, 1:unknown_variates],
+        )
 
     @torch.inference_mode()
     def predict(

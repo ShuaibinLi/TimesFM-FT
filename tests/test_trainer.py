@@ -31,7 +31,10 @@ class _TinyForecast(nn.Module):
     def __init__(self) -> None:
         super().__init__()
         self.offset = nn.Parameter(torch.tensor(0.1))
-        self.backbone = SimpleNamespace(input_patch_len=2)
+        self.backbone = SimpleNamespace(
+            input_patch_len=2,
+            output_patch_len=2,
+        )
 
     def forward(
         self,
@@ -78,6 +81,20 @@ class _TinyForecast(nn.Module):
         raw = self.forward_all(context_values, **kwargs)
         return SimpleNamespace(target=raw[:, 0], past_only=raw[:, 1:2])
 
+    def forward_dense(
+        self,
+        values,
+        *,
+        masks,
+        patch_is_target,
+        unknown_variates,
+    ):
+        del masks, patch_is_target
+        base = values[:, 0, :, -1, None, None] + self.offset
+        target = base.expand(-1, -1, 2, 3)
+        past_only = target[:, None].expand(-1, unknown_variates - 1, -1, -1, -1)
+        return SimpleNamespace(target=target, past_only=past_only)
+
 
 class _CountingSgd(torch.optim.SGD):
     def __init__(self, params) -> None:
@@ -96,10 +113,8 @@ def _batch(samples: int = 2, horizon: int = 2):
         "context_padding_mask": torch.zeros(samples, 4, dtype=torch.bool),
         "past_future_values": torch.ones(samples, 1, 4 + horizon),
         "past_future_mask": torch.zeros(samples, 1, 4 + horizon, dtype=torch.bool),
-        "past_only_future_values": torch.ones(samples, 1, horizon),
-        "past_only_future_mask": torch.zeros(samples, 1, horizon, dtype=torch.bool),
-        "future_values": torch.ones(samples, horizon),
-        "future_mask": torch.zeros(samples, horizon, dtype=torch.bool),
+        "unknown_future_values": torch.ones(samples, 2, horizon),
+        "unknown_future_mask": torch.zeros(samples, 2, horizon, dtype=torch.bool),
         "context_lengths": torch.full((samples,), 4, dtype=torch.int16),
         "timestamps": torch.arange(samples, dtype=torch.int64) + 1,
         "dates": torch.full((samples,), 20250102, dtype=torch.int32),
@@ -118,12 +133,13 @@ def test_gradient_accumulation_steps_partial_final_group():
         loader,
         BusinessForecastLoss(
             model.quantiles,
-            objective=ObjectiveConfig(name="l0"),
+            objective=ObjectiveConfig(name="f0_final"),
             scales=LossScaleState(
                 dataset_id="test",
                 date_file_sha256="test-dates",
                 feature_schema_sha256=None,
                 manifest_sha256="test-manifest",
+                sampling_contract={"training_route": "f0_final"},
                 cumulative_method="mad",
                 auxiliary_method="mad",
                 cumulative={},
@@ -132,6 +148,7 @@ def test_gradient_accumulation_steps_partial_final_group():
         ),
         device=torch.device("cpu"),
         horizon=2,
+        context_min=2,
         evaluation=EvaluationConfig(report_horizons=(1, 2), trading_horizon=2),
         auxiliary_indices=torch.empty(0, dtype=torch.long),
         optimizer=optimizer,
@@ -146,11 +163,11 @@ def test_gradient_accumulation_steps_partial_final_group():
     assert np.isfinite(metrics["mean_pinball"])
 
 
-def test_l2_routes_only_selected_past_only_raw_output():
+def test_f1_mv_routes_only_selected_past_only_dense_output():
     model = _TinyForecast()
     optimizer = _CountingSgd(model.parameters())
     objective = ObjectiveConfig(
-        name="l2",
+        name="f1_mv",
         cumulative_huber_weight=0.3,
         cumulative_horizons=(2,),
         auxiliary_weight=0.05,
@@ -167,6 +184,7 @@ def test_l2_routes_only_selected_past_only_raw_output():
                 date_file_sha256="test-dates",
                 feature_schema_sha256=None,
                 manifest_sha256="test-manifest",
+                sampling_contract={"training_route": "f1_mv"},
                 cumulative_method="mad",
                 auxiliary_method="mad",
                 cumulative={2: ScaleEstimate(1.0, "mad", 10, 1.0)},
@@ -175,6 +193,7 @@ def test_l2_routes_only_selected_past_only_raw_output():
         ),
         device=torch.device("cpu"),
         horizon=2,
+        context_min=2,
         evaluation=EvaluationConfig(report_horizons=(1, 2), trading_horizon=2),
         auxiliary_indices=torch.tensor([0]),
         optimizer=optimizer,
@@ -309,13 +328,20 @@ def test_loss_scales_are_fitted_from_declared_training_bundle(
         dates_path=config.data.train_dates_path,
     )
     objective = ObjectiveConfig(
-        name="l2",
+        name="f1_mv",
         cumulative_huber_weight=0.3,
         cumulative_horizons=(2, 3),
         auxiliary_weight=0.05,
         auxiliary_features=("p1",),
     )
-    scales = trainer.fit_loss_scales(dataset, objective)
+    scales = trainer.fit_loss_scales(
+        dataset,
+        objective,
+        input_patch_length=1,
+        output_patch_length=3,
+        context_min=4,
+        batch_size=2,
+    )
     assert scales.source_split == "train"
     assert set(scales.cumulative) == {2, 3}
     assert scales.auxiliary["p1"].value > 0
@@ -397,8 +423,10 @@ def test_training_writes_versioned_resumable_state(monkeypatch, bundle_factory, 
         map_location="cpu",
         weights_only=False,
     )
-    assert state["format_version"] == 3
+    assert state["format_version"] == 4
     assert state["loss_scales"]["source_split"] == "train"
     scales_file = json.loads((output / "loss_scales.json").read_text())
     assert scales_file["fingerprint"] == state["loss_scales"]["fingerprint"]
     assert (output / "best/adapter.pt").exists()
+    adapter_metadata = json.loads((output / "best/adapter_config.json").read_text())
+    assert adapter_metadata["training_graph"] == "deployment_suffix_decode"

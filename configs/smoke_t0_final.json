@@ -1,0 +1,21 @@
+{
+  "extends": "smoke.json",
+  "data": {
+    "horizon_length": 64,
+    "stride": 8
+  },
+  "model": {
+    "disable_linear_detrending": true
+  },
+  "objective": {
+    "name": "f0_final"
+  },
+  "trainer": {
+    "output_dir": "../outputs/smoke-t0-final",
+    "checkpoint_horizons": [60]
+  },
+  "evaluation": {
+    "report_horizons": [1, 5, 10, 15, 30, 60],
+    "trading_horizon": 60
+  }
+}

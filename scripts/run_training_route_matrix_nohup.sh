@@ -2,13 +2,14 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-RUN_DIR="$REPO_ROOT/outputs/loss-matrix"
+RUN_DIR="$REPO_ROOT/outputs/training-route-matrix"
 LOG_FILE="$RUN_DIR/matrix.log"
 PID_FILE="$RUN_DIR/matrix.pid"
 CONFIGS=(
-  e6_l0_pinball
-  e7_l1_business
-  e8_l2_auxiliary
+  t0_f0_final
+  t1_f0_all
+  t2_f1
+  t3_f1_mv
 )
 mkdir -p "$RUN_DIR"
 
@@ -27,7 +28,7 @@ if [[ "${1:-}" == "--worker" ]]; then
 fi
 
 if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
-  echo "Loss matrix already running with PID $(cat "$PID_FILE")" >&2
+  echo "Training route matrix already running with PID $(cat "$PID_FILE")" >&2
   exit 1
 fi
 nohup "$0" --worker >>"$LOG_FILE" 2>&1 </dev/null &

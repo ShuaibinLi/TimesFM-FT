@@ -59,7 +59,7 @@ class AdapterConfig:
 
 @dataclasses.dataclass(frozen=True)
 class ObjectiveConfig:
-    name: Literal["l0", "l1", "l2"] = "l0"
+    name: Literal["f0_final", "f0_all", "f1", "f1_mv"] = "f0_final"
     return_pinball_weight: float = 1.0
     cumulative_huber_weight: float = 0.0
     cumulative_horizons: tuple[int, ...] = ()
@@ -68,6 +68,10 @@ class ObjectiveConfig:
     auxiliary_weight: float = 0.0
     auxiliary_features: tuple[str, ...] = ()
     auxiliary_scale_method: Literal["mad", "std"] = "mad"
+
+    @property
+    def uses_dense_forward(self) -> bool:
+        return self.name in {"f0_all", "f1", "f1_mv"}
 
 
 @dataclasses.dataclass(frozen=True)
@@ -264,7 +268,7 @@ class ExperimentConfig:
                 raise ValueError("test_dates_path is required with test_path")
 
         objective = self.objective
-        if objective.name not in {"l0", "l1", "l2"}:
+        if objective.name not in {"f0_final", "f0_all", "f1", "f1_mv"}:
             raise ValueError(f"unsupported objective name={objective.name!r}")
         if objective.cumulative_scale_method not in {"mad", "std"}:
             raise ValueError("unsupported cumulative_scale_method")
@@ -304,25 +308,30 @@ class ExperimentConfig:
                 "auxiliary_features must be selected past-only features: "
                 f"{sorted(missing_auxiliary)}"
             )
-        if objective.name == "l0" and (
+        if objective.name in {"f0_final", "f0_all"} and (
             objective.cumulative_huber_weight != 0
             or objective.cumulative_horizons
             or objective.auxiliary_weight != 0
             or objective.auxiliary_features
         ):
-            raise ValueError("L0 must use return Pinball only")
-        if objective.name == "l1" and (
+            raise ValueError("F0-final/F0-all must use return Pinball only")
+        if objective.name == "f1" and (
             objective.cumulative_huber_weight <= 0
             or objective.auxiliary_weight != 0
             or objective.auxiliary_features
         ):
-            raise ValueError("L1 requires cumulative Huber and no auxiliary loss")
-        if objective.name == "l2" and (
+            raise ValueError("F1 requires final cumulative Huber and no auxiliary loss")
+        if objective.name == "f1_mv" and (
             objective.cumulative_huber_weight <= 0
             or objective.auxiliary_weight <= 0
             or not objective.auxiliary_features
         ):
-            raise ValueError("L2 requires cumulative Huber plus selected auxiliary features")
+            raise ValueError("F1-MV requires cumulative Huber plus selected auxiliary features")
+        if objective.uses_dense_forward:
+            if data.horizon_length != 64:
+                raise ValueError("dense routes require the checkpoint output horizon of 64")
+            if not self.model.disable_linear_detrending:
+                raise ValueError("dense routes require disable_linear_detrending=true")
         if self.adapter.last_n_layers <= 0:
             raise ValueError("last_n_layers must be positive")
         if self.adapter.type == "lora" and self.adapter.rank <= 0:

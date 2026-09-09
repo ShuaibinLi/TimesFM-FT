@@ -27,6 +27,10 @@ from timesfm_ft.data import (
     WindowBatch,
     collate_intraday_windows,
 )
+from timesfm_ft.dense import (
+    build_dense_training_batch,
+    gather_final_anchor,
+)
 from timesfm_ft.losses import (
     BusinessForecastLoss,
     LossScaleState,
@@ -156,20 +160,18 @@ def _robust_scale(values: np.ndarray, method: str) -> ScaleEstimate:
 def fit_loss_scales(
     dataset: IntradayWindowDataset,
     objective: ObjectiveConfig,
+    *,
+    input_patch_length: int | None = None,
+    output_patch_length: int | None = None,
+    context_min: int | None = None,
+    batch_size: int = 128,
 ) -> LossScaleState:
-    """Fits every L1/L2 normalization scale from the training bundle only."""
+    """Fits route-specific normalization scales from the train split only."""
 
     if dataset.metadata.get("split") != "train":
         raise ValueError("loss scales may only be fitted from split=train")
     cumulative_values: dict[int, list[float]] = {
         horizon: [] for horizon in objective.cumulative_horizons
-    }
-    auxiliary_source_indices = {
-        feature: int(dataset._past_only_indices[dataset.past_only_features.index(feature)])
-        for feature in objective.auxiliary_features
-    }
-    auxiliary_values: dict[str, list[np.ndarray]] = {
-        feature: [] for feature in objective.auxiliary_features
     }
     for day_value, anchor_value in zip(
         dataset._day_indices,
@@ -179,16 +181,11 @@ def fit_loss_scales(
         day = int(day_value)
         anchor = int(anchor_value)
         start = anchor + 1
-        stop = start + dataset.horizon_length
         for horizon in objective.cumulative_horizons:
             target = dataset.target_values[day, start : start + horizon]
             mask = dataset.target_mask[day, start : start + horizon]
             if not mask.any():
                 cumulative_values[horizon].append(float(np.sum(target, dtype=np.float64)))
-        for feature, source_index in auxiliary_source_indices.items():
-            values = dataset._all_past_only_values[day, source_index, start:stop]
-            mask = dataset._all_past_only_mask[day, source_index, start:stop]
-            auxiliary_values[feature].append(np.asarray(values[~mask]))
     cumulative_scales = {
         horizon: _robust_scale(
             np.asarray(values),
@@ -197,6 +194,46 @@ def fit_loss_scales(
         for horizon, values in cumulative_values.items()
     }
 
+    auxiliary_values: dict[str, list[np.ndarray]] = {
+        feature: [] for feature in objective.auxiliary_features
+    }
+    if objective.auxiliary_features:
+        if (
+            not objective.uses_dense_forward
+            or input_patch_length is None
+            or output_patch_length is None
+            or context_min is None
+        ):
+            raise ValueError("dense auxiliary scales require patch lengths and context_min")
+        auxiliary_indices = [
+            dataset.past_only_features.index(feature) for feature in objective.auxiliary_features
+        ]
+        scale_loader = _make_loader(
+            dataset,
+            batch_size=batch_size,
+            patch_length=input_patch_length,
+            shuffle=False,
+            num_workers=0,
+            pin_memory=False,
+            generator=None,
+        )
+        for raw_batch in scale_loader:
+            dense = build_dense_training_batch(
+                raw_batch,
+                context_min=context_min,
+                input_patch_length=input_patch_length,
+                output_patch_length=output_patch_length,
+            )
+            for feature, index in zip(
+                objective.auxiliary_features,
+                auxiliary_indices,
+                strict=True,
+            ):
+                labels = dense.past_only_labels[:, index]
+                valid = (
+                    dense.eligible_anchor_mask[:, :, None] & ~dense.past_only_label_mask[:, index]
+                )
+                auxiliary_values[feature].append(labels[valid].numpy())
     auxiliary_scales = {
         feature: _robust_scale(
             np.concatenate(values) if values else np.asarray([]),
@@ -215,6 +252,15 @@ def fit_loss_scales(
         date_file_sha256=str(dataset.metadata["date_file_sha256"]),
         feature_schema_sha256=dataset.metadata.get("feature_schema_sha256"),
         manifest_sha256=hashlib.sha256(manifest_payload).hexdigest(),
+        sampling_contract={
+            "training_route": objective.name,
+            "context_min": dataset.context_min,
+            "context_max": dataset.context_max,
+            "horizon_length": dataset.horizon_length,
+            "stride": dataset.stride,
+            "input_patch_length": input_patch_length,
+            "output_patch_length": output_patch_length,
+        },
         cumulative_method=objective.cumulative_scale_method,
         auxiliary_method=objective.auxiliary_scale_method,
         cumulative=cumulative_scales,
@@ -257,6 +303,7 @@ def _run_epoch(
     *,
     device: torch.device,
     horizon: int,
+    context_min: int,
     evaluation: EvaluationConfig,
     auxiliary_indices: torch.Tensor,
     optimizer: torch.optim.Optimizer | None,
@@ -279,6 +326,8 @@ def _run_epoch(
     }
     component_counts = {name: 0 for name in component_sums}
     sample_count = 0
+    eligible_anchor_count = 0
+    unique_dense_anchors: set[tuple[int, int]] = set()
     gradient_norm_total = 0.0
     optimizer_updates = 0
     started_at = time.perf_counter()
@@ -300,6 +349,8 @@ def _run_epoch(
     with grad_context():
         for step, raw_batch in enumerate(loader):
             batch = _move_batch(raw_batch, device)
+            business_targets = batch["unknown_future_values"][:, 0]
+            business_target_mask = batch["unknown_future_mask"][:, 0]
             model_kwargs = {
                 "horizon": horizon,
                 "context_mask": batch["context_mask"],
@@ -310,41 +361,101 @@ def _run_epoch(
             auxiliary_predictions: torch.Tensor | None = None
             auxiliary_targets: torch.Tensor | None = None
             auxiliary_mask: torch.Tensor | None = None
-            if auxiliary_indices.numel():
-                unknown_predictions = model.forward_unknown(
-                    batch["context_values"],
-                    **model_kwargs,
+            auxiliary_anchor_mask: torch.Tensor | None = None
+            if loss_fn.objective.uses_dense_forward:
+                dense_batch = build_dense_training_batch(
+                    batch,
+                    context_min=context_min,
+                    input_patch_length=int(model.backbone.input_patch_len),
+                    output_patch_length=int(model.backbone.output_patch_len),
                 )
-                predictions = unknown_predictions.target
-                auxiliary_predictions = unknown_predictions.past_only.index_select(
-                    1, auxiliary_indices
+                dense_predictions = model.forward_dense(
+                    dense_batch.values,
+                    masks=dense_batch.masks,
+                    patch_is_target=dense_batch.patch_is_target,
+                    unknown_variates=batch["context_values"].shape[1],
                 )
-                auxiliary_targets = batch["past_only_future_values"].index_select(
-                    1, auxiliary_indices
+                predictions = dense_predictions.target
+                targets = dense_batch.target_labels
+                target_mask = dense_batch.target_label_mask
+                anchor_mask = dense_batch.eligible_anchor_mask
+                eligible_anchor_count += int(anchor_mask.sum().item())
+                dense_dates = batch["dates"][:, None].expand_as(dense_batch.anchor_timestamps)
+                for date, timestamp in zip(
+                    dense_dates[anchor_mask].detach().cpu().tolist(),
+                    dense_batch.anchor_timestamps[anchor_mask].detach().cpu().tolist(),
+                    strict=True,
+                ):
+                    unique_dense_anchors.add((int(date), int(timestamp)))
+                final_predictions = gather_final_anchor(
+                    dense_predictions.target,
+                    dense_batch.final_anchor_indices,
                 )
-                auxiliary_mask = batch["past_only_future_mask"].index_select(1, auxiliary_indices)
+                metric_predictions = final_predictions
+                if auxiliary_indices.numel():
+                    auxiliary_predictions = dense_predictions.past_only.index_select(
+                        1, auxiliary_indices
+                    )
+                    auxiliary_targets = dense_batch.past_only_labels.index_select(
+                        1, auxiliary_indices
+                    )
+                    auxiliary_mask = dense_batch.past_only_label_mask.index_select(
+                        1, auxiliary_indices
+                    )
+                    auxiliary_anchor_mask = dense_batch.eligible_anchor_mask
             else:
-                predictions = model(
+                metric_predictions = model(
                     batch["context_values"],
                     **model_kwargs,
                 )
+                predictions = metric_predictions
+                targets = business_targets
+                target_mask = business_target_mask
+                anchor_mask = None
+                final_predictions = None
             losses = loss_fn(
                 predictions,
-                batch["future_values"],
-                target_mask=batch["future_mask"],
+                targets,
+                target_mask=target_mask,
+                anchor_mask=anchor_mask,
+                final_predictions=final_predictions,
+                final_targets=business_targets,
+                final_target_mask=business_target_mask,
                 auxiliary_predictions=auxiliary_predictions,
                 auxiliary_targets=auxiliary_targets,
                 auxiliary_mask=auxiliary_mask,
+                auxiliary_anchor_mask=auxiliary_anchor_mask,
             )
             if not torch.isfinite(losses.total).item():
                 raise FloatingPointError(
                     f"non-finite {split} loss at epoch={epoch} step={step + 1}"
                 )
             if accumulator is not None:
+                if loss_fn.objective.uses_dense_forward:
+                    deployment_predictions = model.predict(
+                        batch["context_values"],
+                        **model_kwargs,
+                    )
+                    if not torch.allclose(
+                        metric_predictions.float(),
+                        deployment_predictions.float(),
+                        rtol=1e-4,
+                        atol=1e-5,
+                    ):
+                        difference = (
+                            (metric_predictions.float() - deployment_predictions.float())
+                            .abs()
+                            .max()
+                        )
+                        raise FloatingPointError(
+                            "dense final-token/deployment parity failed; "
+                            f"max_abs_error={float(difference):.6g}"
+                        )
+                    metric_predictions = deployment_predictions
                 accumulator.update(
-                    predictions,
-                    batch["future_values"],
-                    batch["future_mask"],
+                    metric_predictions,
+                    business_targets,
+                    business_target_mask,
                     last_returns=batch["last_returns"],
                     context_lengths=batch["context_lengths"],
                     dates=batch["dates"],
@@ -403,7 +514,7 @@ def _run_epoch(
                 count = batch_counts[name]
                 component_sums[name].add_(value.detach().double() * count)
                 component_counts[name] += count
-            sample_count += len(batch["future_values"])
+            sample_count += len(business_targets)
             if training and ((step + 1) % log_every_steps == 0 or step + 1 == len(loader)):
                 running = {
                     name: float(component_sums[name].item()) / max(component_counts[name], 1)
@@ -457,6 +568,17 @@ def _run_epoch(
         "mean_pinball": components["return_pinball"],
         "elapsed_seconds": elapsed,
         "samples_per_second": sample_count / max(elapsed, 1e-9),
+        "eligible_dense_anchors": (
+            eligible_anchor_count if loss_fn.objective.uses_dense_forward else None
+        ),
+        "unique_dense_anchors": (
+            len(unique_dense_anchors) if loss_fn.objective.uses_dense_forward else None
+        ),
+        "dense_anchor_repeat_factor": (
+            eligible_anchor_count / max(len(unique_dense_anchors), 1)
+            if loss_fn.objective.uses_dense_forward
+            else None
+        ),
     }
     if accumulator is not None:
         summary, _, cumulative, slices = accumulator.results()
@@ -519,7 +641,7 @@ def _training_state(
     loss_scales: LossScaleState,
 ) -> dict[str, Any]:
     return {
-        "format_version": 3,
+        "format_version": 4,
         "adapter": model.trainable_state_dict(),
         "optimizer": optimizer.state_dict(),
         "scheduler": scheduler.state_dict(),
@@ -548,7 +670,7 @@ def _load_training_state(
     if path.is_dir():
         path = path / "training_state.pt"
     state = torch.load(path, map_location="cpu", weights_only=False)
-    if not isinstance(state, dict) or state.get("format_version") != 3:
+    if not isinstance(state, dict) or state.get("format_version") != 4:
         raise ValueError(f"unsupported training checkpoint: {path}")
     saved_config = state.get("config", {})
     current_config = config.to_dict()
@@ -592,6 +714,7 @@ def _dataset(
     path: str,
     split: str,
     dates_path: str | None,
+    for_training: bool = False,
 ) -> IntradayWindowDataset:
     return IntradayWindowDataset(
         path,
@@ -602,6 +725,7 @@ def _dataset(
         past_only_features=config.data.past_only_features,
         past_future_features=config.data.past_future_features,
         max_variates=config.data.max_variates,
+        require_complete_future=(for_training and config.objective.uses_dense_forward),
         expected_split=split,
         expected_dataset_id=config.data.dataset_id,
         expected_product=config.data.product,
@@ -630,12 +754,14 @@ def train_experiment(config: ExperimentConfig) -> Path:
         path=config.data.train_path,
         split="train",
         dates_path=config.data.train_dates_path,
+        for_training=True,
     )
     val_data = _dataset(
         config,
         path=config.data.val_path,
         split="val",
         dates_path=config.data.val_dates_path,
+        for_training=True,
     )
     if train_data.num_variates != val_data.num_variates:
         raise ValueError("train and validation variate counts differ")
@@ -684,7 +810,14 @@ def train_experiment(config: ExperimentConfig) -> Path:
         generator=None,
     )
 
-    loss_scales = fit_loss_scales(train_data, config.objective)
+    loss_scales = fit_loss_scales(
+        train_data,
+        config.objective,
+        input_patch_length=int(model.backbone.input_patch_len),
+        output_patch_length=int(model.backbone.output_patch_len),
+        context_min=config.data.context_min,
+        batch_size=max(config.trainer.batch_size, 1),
+    )
     loss_fn = BusinessForecastLoss(
         model.quantiles,
         objective=config.objective,
@@ -795,6 +928,7 @@ def train_experiment(config: ExperimentConfig) -> Path:
             loss_fn,
             device=device,
             horizon=config.data.horizon_length,
+            context_min=config.data.context_min,
             evaluation=config.evaluation,
             auxiliary_indices=auxiliary_indices,
             optimizer=optimizer,
@@ -811,6 +945,7 @@ def train_experiment(config: ExperimentConfig) -> Path:
             loss_fn,
             device=device,
             horizon=config.data.horizon_length,
+            context_min=config.data.context_min,
             evaluation=config.evaluation,
             auxiliary_indices=auxiliary_indices,
             optimizer=None,
@@ -929,6 +1064,16 @@ def train_experiment(config: ExperimentConfig) -> Path:
             "checkpoint_horizons": config.trainer.checkpoint_horizons,
             "checkpoint_mode": checkpoint_mode,
             "objective": config.objective.name,
+            "training_graph": (
+                "public_torch_full_sequence_forward"
+                if config.objective.uses_dense_forward
+                else "deployment_suffix_decode"
+            ),
+            "training_semantics_status": (
+                "pretraining-like-engineering-route-not-official-recipe"
+                if config.objective.uses_dense_forward
+                else "deployment-consistent"
+            ),
             "loss_scales": loss_scales.to_dict(),
             "validation_scorecard": validation_scorecard,
             "data_metadata": data_metadata,

@@ -1,0 +1,9 @@
+{
+  "extends": "smoke_t0_final.json",
+  "objective": {
+    "name": "f0_all"
+  },
+  "trainer": {
+    "output_dir": "../outputs/smoke-t1-f0-all"
+  }
+}

@@ -39,11 +39,14 @@ def test_dynamic_context_and_future_alignment(bundle_factory):
     sample = dataset[1]
     assert sample["context_length"] == 5
     torch.testing.assert_close(sample["context_values"][0], torch.arange(5, dtype=torch.float32))
-    torch.testing.assert_close(sample["future_values"], torch.tensor([5.0, 6.0, 7.0]))
-    assert sample["past_future_values"].shape == (1, 8)
-    assert sample["past_only_future_values"].shape == (1, 3)
     torch.testing.assert_close(
-        sample["past_only_future_values"][0],
+        sample["unknown_future_values"][0],
+        torch.tensor([5.0, 6.0, 7.0]),
+    )
+    assert sample["past_future_values"].shape == (1, 8)
+    assert sample["unknown_future_values"].shape == (2, 3)
+    torch.testing.assert_close(
+        sample["unknown_future_values"][1],
         torch.tensor([6.0, 7.0, 8.0]),
     )
     assert sample["date"] == 20250102
@@ -60,7 +63,7 @@ def test_collate_pads_only_to_patch_bucket_and_preserves_known_future(
     )
     assert batch["context_values"].shape == (2, 2, 8)
     assert batch["past_future_values"].shape == (2, 1, 11)
-    assert batch["past_only_future_values"].shape == (2, 1, 3)
+    assert batch["unknown_future_values"].shape == (2, 2, 3)
     assert batch["context_padding_mask"][0, :3].all()
     assert not batch["context_padding_mask"][0, 3:].any()
     assert batch["context_mask"][0, :, :3].all()
@@ -125,7 +128,11 @@ def test_invalid_future_is_masked_and_invalid_cutoff_is_not_sampled(bundle_facto
     )
     assert len(dataset) == 11
     first = dataset[0]
-    assert first["future_mask"].tolist() == [True, False, False]
+    assert first["unknown_future_mask"][0].tolist() == [
+        True,
+        False,
+        False,
+    ]
     assert first["timestamp"] != int(dataset.timestamps[0, 4])
 
 
@@ -188,3 +195,25 @@ def test_masked_covariates_still_require_finite_fill_values(bundle_factory):
             horizon_length=3,
             stride=1,
         )
+
+
+def test_390_minute_session_has_exact_business_anchor_boundaries(
+    bundle_factory,
+):
+    path, _ = bundle_factory(
+        "full-session",
+        days=1,
+        minutes=390,
+    )
+    dataset = IntradayWindowDataset(
+        path,
+        context_min=64,
+        context_max=192,
+        horizon_length=64,
+        stride=1,
+    )
+    assert len(dataset) == 263
+    assert int(dataset._anchor_indices[0]) == 63
+    assert int(dataset._anchor_indices[-1]) == 325
+    assert dataset[0]["unknown_future_values"][0, 0] == 64
+    assert dataset[-1]["unknown_future_values"][0, -1] == 389

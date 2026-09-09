@@ -45,6 +45,7 @@ class LossScaleState:
     date_file_sha256: str
     feature_schema_sha256: str | None
     manifest_sha256: str
+    sampling_contract: dict[str, Any]
     cumulative_method: str
     auxiliary_method: str
     cumulative: dict[int, ScaleEstimate]
@@ -57,6 +58,8 @@ class LossScaleState:
             raise ValueError("loss scales must be version 2 and fitted on train")
         if not self.dataset_id or not self.date_file_sha256 or not self.manifest_sha256:
             raise ValueError("loss scales require training data provenance")
+        if self.sampling_contract.get("training_route") != objective.name:
+            raise ValueError("loss-scale training route mismatch")
         if self.cumulative_method != objective.cumulative_scale_method:
             raise ValueError("cumulative scale method does not match objective")
         if self.auxiliary_method != objective.auxiliary_scale_method:
@@ -82,6 +85,7 @@ class LossScaleState:
             "date_file_sha256": self.date_file_sha256,
             "feature_schema_sha256": self.feature_schema_sha256,
             "manifest_sha256": self.manifest_sha256,
+            "sampling_contract": self.sampling_contract,
             "cumulative_method": self.cumulative_method,
             "auxiliary_method": self.auxiliary_method,
             "cumulative": {
@@ -133,7 +137,7 @@ def _masked_mean_or_zero(
 
 
 class BusinessForecastLoss(nn.Module):
-    """L0/L1/L2 objective from the v1.3 business fine-tuning plan."""
+    """F0-final/F0-all/F1/F1-MV route objective."""
 
     def __init__(
         self,
@@ -214,17 +218,26 @@ class BusinessForecastLoss(nn.Module):
         targets: torch.Tensor,
         *,
         target_mask: torch.Tensor,
+        anchor_mask: torch.Tensor | None = None,
+        final_predictions: torch.Tensor | None = None,
+        final_targets: torch.Tensor | None = None,
+        final_target_mask: torch.Tensor | None = None,
         auxiliary_predictions: torch.Tensor | None = None,
         auxiliary_targets: torch.Tensor | None = None,
         auxiliary_mask: torch.Tensor | None = None,
+        auxiliary_anchor_mask: torch.Tensor | None = None,
     ) -> LossOutput:
-        if predictions.ndim != 3:
-            raise ValueError("target predictions must have shape (batch, horizon, quantiles)")
-        if targets.shape != predictions.shape[:2] or target_mask.shape != targets.shape:
-            raise ValueError("target values/mask must match prediction batch/horizon")
+        if predictions.ndim not in {3, 4}:
+            raise ValueError("target predictions must be (B,H,Q) or dense (B,N,H,Q)")
+        if targets.shape != predictions.shape[:-1] or target_mask.shape != targets.shape:
+            raise ValueError("target values/mask must match predictions")
         if predictions.shape[-1] != self.quantile_count:
             raise ValueError("prediction quantile count mismatch")
         valid_target = ~target_mask.bool()
+        if anchor_mask is not None:
+            if predictions.ndim != 4 or anchor_mask.shape != targets.shape[:2]:
+                raise ValueError("dense anchor_mask must have shape (B,N)")
+            valid_target &= anchor_mask[:, :, None]
         if not torch.any(valid_target).item():
             raise ValueError("loss batch has no valid return target")
         predictions = predictions.float()
@@ -235,19 +248,36 @@ class BusinessForecastLoss(nn.Module):
         cumulative_huber = _zero(predictions)
         cumulative_count = 0
         if self.objective.cumulative_huber_weight > 0:
-            median = predictions[:, :, self.median_index]
+            if final_predictions is None:
+                if predictions.ndim != 3:
+                    raise ValueError("dense cumulative loss requires final_predictions")
+                final_predictions = predictions
+                final_targets = targets
+                final_target_mask = target_mask
+            if (
+                final_targets is None
+                or final_target_mask is None
+                or final_predictions.ndim != 3
+                or final_targets.shape != final_predictions.shape[:2]
+                or final_target_mask.shape != final_targets.shape
+            ):
+                raise ValueError("invalid final-anchor cumulative tensors")
+            final_predictions = final_predictions.float()
+            final_targets = final_targets.float()
+            final_valid = ~final_target_mask.bool()
+            median = final_predictions[:, :, self.median_index]
             horizon_losses: list[torch.Tensor] = []
             for index, horizon_value in enumerate(self.cumulative_horizons):
                 horizon = int(horizon_value.item())
-                path_valid = valid_target[:, :horizon].all(dim=1)
+                path_valid = final_valid[:, :horizon].all(dim=1)
                 prediction_sum = torch.where(
-                    valid_target[:, :horizon],
+                    final_valid[:, :horizon],
                     median[:, :horizon],
                     0.0,
                 ).sum(dim=1)
                 target_sum = torch.where(
-                    valid_target[:, :horizon],
-                    targets[:, :horizon],
+                    final_valid[:, :horizon],
+                    final_targets[:, :horizon],
                     0.0,
                 ).sum(dim=1)
                 normalized_error = (prediction_sum - target_sum) / self.cumulative_scales[index]
@@ -267,19 +297,17 @@ class BusinessForecastLoss(nn.Module):
         auxiliary_count = 0
         if self.objective.auxiliary_weight > 0:
             if auxiliary_predictions is None or auxiliary_targets is None or auxiliary_mask is None:
-                raise ValueError("L2 requires auxiliary predictions, targets, and mask")
-            expected_prediction_shape = (
-                predictions.shape[0],
-                len(self.objective.auxiliary_features),
-                predictions.shape[1],
-                self.quantile_count,
-            )
-            expected_target_shape = expected_prediction_shape[:-1]
-            if auxiliary_predictions.shape != expected_prediction_shape:
-                raise ValueError(
-                    "auxiliary prediction shape mismatch: "
-                    f"{auxiliary_predictions.shape} != {expected_prediction_shape}"
-                )
+                raise ValueError("F1-MV requires auxiliary predictions, targets, and mask")
+            if auxiliary_predictions.ndim not in {4, 5}:
+                raise ValueError("auxiliary predictions must be (B,A,H,Q) or (B,A,N,H,Q)")
+            if (
+                auxiliary_predictions.shape[0] != predictions.shape[0]
+                or auxiliary_predictions.shape[1] != len(self.objective.auxiliary_features)
+                or auxiliary_predictions.shape[-2] != predictions.shape[-2]
+                or auxiliary_predictions.shape[-1] != self.quantile_count
+            ):
+                raise ValueError("auxiliary prediction shape mismatch")
+            expected_target_shape = auxiliary_predictions.shape[:-1]
             if (
                 auxiliary_targets.shape != expected_target_shape
                 or auxiliary_mask.shape != expected_target_shape
@@ -288,6 +316,17 @@ class BusinessForecastLoss(nn.Module):
             feature_losses: list[torch.Tensor] = []
             for feature_index in range(len(self.objective.auxiliary_features)):
                 feature_valid = ~auxiliary_mask[:, feature_index].bool()
+                if auxiliary_anchor_mask is not None:
+                    expected_anchor_shape = (
+                        auxiliary_targets.shape[0],
+                        auxiliary_targets.shape[2],
+                    )
+                    if (
+                        auxiliary_predictions.ndim != 5
+                        or auxiliary_anchor_mask.shape != expected_anchor_shape
+                    ):
+                        raise ValueError("auxiliary_anchor_mask must have shape (B,N)")
+                    feature_valid &= auxiliary_anchor_mask[:, :, None]
                 if feature_valid.any().item():
                     feature_losses.append(
                         self._pinball(

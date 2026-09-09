@@ -45,7 +45,7 @@
     "last_n_layers": 1
   },
   "objective": {
-    "name": "l0",
+    "name": "f0_final",
     "return_pinball_weight": 1.0,
     "cumulative_huber_weight": 0.0,
     "cumulative_horizons": [],

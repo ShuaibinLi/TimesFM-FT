@@ -1,15 +1,14 @@
 {
-  "extends": "e7_l1_business.json",
+  "extends": "smoke_t2_f1.json",
   "objective": {
-    "name": "l2",
+    "name": "f1_mv",
     "auxiliary_weight": 0.05,
     "auxiliary_features": [
       "realized_vol_15m",
-      "spread",
-      "volume"
+      "market_return_1m"
     ]
   },
   "trainer": {
-    "output_dir": "../../outputs/e8-l2-auxiliary"
+    "output_dir": "../outputs/smoke-t3-f1-mv"
   }
 }

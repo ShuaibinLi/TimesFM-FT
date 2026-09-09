@@ -135,8 +135,8 @@ def evaluate_experiment(
         )
         accumulator.update(
             predictions,
-            batch["future_values"],
-            batch["future_mask"],
+            batch["unknown_future_values"][:, 0],
+            batch["unknown_future_mask"][:, 0],
             last_returns=batch["last_returns"],
             context_lengths=batch["context_lengths"],
             dates=batch["dates"],

@@ -23,10 +23,8 @@ class WindowSample(TypedDict):
     context_mask: torch.Tensor
     past_future_values: torch.Tensor
     past_future_mask: torch.Tensor
-    past_only_future_values: torch.Tensor
-    past_only_future_mask: torch.Tensor
-    future_values: torch.Tensor
-    future_mask: torch.Tensor
+    unknown_future_values: torch.Tensor
+    unknown_future_mask: torch.Tensor
     context_length: int
     timestamp: int
     date: int
@@ -41,10 +39,8 @@ class WindowBatch(TypedDict):
     context_padding_mask: torch.Tensor
     past_future_values: torch.Tensor
     past_future_mask: torch.Tensor
-    past_only_future_values: torch.Tensor
-    past_only_future_mask: torch.Tensor
-    future_values: torch.Tensor
-    future_mask: torch.Tensor
+    unknown_future_values: torch.Tensor
+    unknown_future_mask: torch.Tensor
     context_lengths: torch.Tensor
     timestamps: torch.Tensor
     dates: torch.Tensor
@@ -101,6 +97,7 @@ class IntradayWindowDataset(Dataset[WindowSample]):
         past_only_features: Sequence[str] = (),
         past_future_features: Sequence[str] = (),
         max_variates: int = 32,
+        require_complete_future: bool = False,
         expected_split: str | None = None,
         expected_dataset_id: str | None = None,
         expected_product: str | None = None,
@@ -173,6 +170,7 @@ class IntradayWindowDataset(Dataset[WindowSample]):
         self.context_max = context_max
         self.horizon_length = horizon_length
         self.stride = stride
+        self.require_complete_future = require_complete_future
         self._validate_metadata(
             expected_split=expected_split,
             expected_dataset_id=expected_dataset_id,
@@ -206,6 +204,8 @@ class IntradayWindowDataset(Dataset[WindowSample]):
                     anchor + 1,
                     anchor + 1 + self.horizon_length,
                 )
+                if self.require_complete_future and self.target_mask[day_index, future].any():
+                    continue
                 if self.target_mask[day_index, future].all():
                     continue
                 day_indices.append(day_index)
@@ -402,14 +402,22 @@ class IntradayWindowDataset(Dataset[WindowSample]):
         known_mask = self._all_past_future_mask[
             day, self._past_future_indices, context_start:future_stop
         ]
-        past_only_future_values = self._all_past_only_values[
+        covariate_future_values = self._all_past_only_values[
             day, self._past_only_indices, future_start:future_stop
         ]
-        past_only_future_mask = self._all_past_only_mask[
+        covariate_future_mask = self._all_past_only_mask[
             day, self._past_only_indices, future_start:future_stop
         ]
         future_values = self.target_values[day, future_start:future_stop]
         future_mask = self.target_mask[day, future_start:future_stop]
+        unknown_future_values = np.concatenate(
+            (future_values[None, :], covariate_future_values),
+            axis=0,
+        )
+        unknown_future_mask = np.concatenate(
+            (future_mask[None, :], covariate_future_mask),
+            axis=0,
+        )
         valid_context = target_context[~target_context_mask]
         volatility = float(np.std(valid_context, dtype=np.float64))
         return {
@@ -417,12 +425,8 @@ class IntradayWindowDataset(Dataset[WindowSample]):
             "context_mask": torch.from_numpy(np.array(context_mask, copy=True)),
             "past_future_values": torch.from_numpy(np.array(known_values, copy=True)),
             "past_future_mask": torch.from_numpy(np.array(known_mask, copy=True)),
-            "past_only_future_values": torch.from_numpy(
-                np.array(past_only_future_values, copy=True)
-            ),
-            "past_only_future_mask": torch.from_numpy(np.array(past_only_future_mask, copy=True)),
-            "future_values": torch.from_numpy(np.array(future_values, copy=True)),
-            "future_mask": torch.from_numpy(np.array(future_mask, copy=True)),
+            "unknown_future_values": torch.from_numpy(np.array(unknown_future_values, copy=True)),
+            "unknown_future_mask": torch.from_numpy(np.array(unknown_future_mask, copy=True)),
             "context_length": context_length,
             "timestamp": int(self.timestamps[day, anchor]),
             "date": int(self.dates[day]),
@@ -496,7 +500,7 @@ def collate_intraday_windows(
 
     if not samples:
         raise ValueError("cannot collate an empty sample list")
-    horizon = int(samples[0]["future_values"].shape[-1])
+    horizon = int(samples[0]["unknown_future_values"].shape[-1])
     context_variates = int(samples[0]["context_values"].shape[0])
     future_variates = int(samples[0]["past_future_values"].shape[0])
     padded_context = max(
@@ -531,14 +535,10 @@ def collate_intraday_windows(
         "context_padding_mask": context_padding_mask,
         "past_future_values": known_values,
         "past_future_mask": known_mask,
-        "past_only_future_values": torch.stack(
-            [sample["past_only_future_values"] for sample in samples]
+        "unknown_future_values": torch.stack(
+            [sample["unknown_future_values"] for sample in samples]
         ),
-        "past_only_future_mask": torch.stack(
-            [sample["past_only_future_mask"] for sample in samples]
-        ),
-        "future_values": torch.stack([sample["future_values"] for sample in samples]),
-        "future_mask": torch.stack([sample["future_mask"] for sample in samples]),
+        "unknown_future_mask": torch.stack([sample["unknown_future_mask"] for sample in samples]),
         "context_lengths": torch.tensor(
             [sample["context_length"] for sample in samples], dtype=torch.int16
         ),
