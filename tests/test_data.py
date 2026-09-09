@@ -1,177 +1,143 @@
 from __future__ import annotations
 
-import json
-
 import numpy as np
 import pytest
+import torch
 
-from timesfm_ft.data import NpzWindowDataset
-
-
-def test_loads_single_and_multi_input_contract(tmp_path):
-    future = np.ones((3, 6), dtype=np.float32)
-    for variates in (1, 4):
-        path = tmp_path / f"v{variates}.npz"
-        context = np.ones((3, variates, 16), dtype=np.float32)
-        np.savez(path, context_values=context, future_values=future)
-        dataset = NpzWindowDataset(
-            path,
-            context_length=16,
-            horizon_length=6,
-            max_variates=4,
-        )
-        assert len(dataset) == 3
-        assert dataset.num_variates == variates
-        assert dataset[0]["context_values"].shape == (variates, 16)
-        assert dataset[0]["future_values"].shape == (6,)
-
-
-def test_nonfinite_values_become_masked(tmp_path):
-    context = np.ones((2, 1, 16), dtype=np.float32)
-    context[0, 0, 3] = np.nan
-    future = np.ones((2, 6), dtype=np.float32)
-    path = tmp_path / "masked.npz"
-    np.savez(path, context_values=context, future_values=future)
-
-    dataset = NpzWindowDataset(
-        path,
-        context_length=16,
-        horizon_length=6,
-    )
-    assert dataset[0]["context_mask"][0, 3]
-    assert dataset[0]["context_values"][0, 3] == 0
-
-
-def test_rejects_missing_cutoff_price(tmp_path):
-    context = np.ones((2, 1, 16), dtype=np.float32)
-    context[0, 0, -1] = np.nan
-    future = np.ones((2, 6), dtype=np.float32)
-    path = tmp_path / "bad.npz"
-    np.savez(path, context_values=context, future_values=future)
-
-    with pytest.raises(ValueError, match="forecast cutoff"):
-        NpzWindowDataset(path, context_length=16, horizon_length=6)
-
-
-def test_loads_memory_mapped_bundle_and_validates_metadata(tmp_path):
-    bundle = tmp_path / "train"
-    bundle.mkdir()
-    context = np.ones((3, 16), dtype=np.float32)
-    future = np.ones((3, 6), dtype=np.float32)
-    timestamps = np.array([1_000, 2_000, 3_000], dtype=np.int64)
-    dates = np.full(3, 20250102, dtype=np.int32)
-    for name, value in {
-        "context_values": context,
-        "future_values": future,
-        "timestamps": timestamps,
-        "dates": dates,
-    }.items():
-        np.save(bundle / f"{name}.npy", value)
-    (bundle / "manifest.json").write_text(
-        json.dumps(
-            {
-                "format": "timesfm-ft-npy-bundle",
-                "format_version": 1,
-                "product": "ZN",
-                "split": "train",
-                "context_length": 16,
-                "horizon_length": 6,
-                "stride": 1,
-                "sampling_interval_seconds": 0.000001,
-                "samples": 3,
-                "schema": {
-                    "context_values": ["float32", 3, 16],
-                    "future_values": ["float32", 3, 6],
-                    "timestamps": ["int64", 3],
-                    "dates": ["int32", 3],
-                },
-                "samples_by_day": {"20250102": 3},
-                "date_count": 1,
-                "first_date": "20250102",
-                "last_date": "20250102",
-                "session": {
-                    "timezone": "America/New_York",
-                    "start": "09:30:00",
-                    "end": "16:15:00",
-                    "early_closes_allowed": True,
-                },
-            }
-        )
-    )
-
-    dataset = NpzWindowDataset(
-        bundle,
-        context_length=16,
-        horizon_length=6,
-        sampling_interval_seconds=0.000001,
-        expected_stride=1,
-        expected_product="ZN",
-        expected_split="train",
-        expected_dates={20250102},
-        require_metadata=True,
-    )
-    assert len(dataset) == 3
-    root = dataset.context_values
-    memory_mapped = isinstance(root, np.memmap)
-    while getattr(root, "base", None) is not None:
-        root = root.base
-        memory_mapped = memory_mapped or isinstance(root, np.memmap)
-    assert memory_mapped
-
-
-def test_rejects_metadata_mismatch(tmp_path):
-    path = tmp_path / "data.npz"
-    np.savez(
-        path,
-        context_values=np.ones((2, 16), dtype=np.float32),
-        future_values=np.ones((2, 6), dtype=np.float32),
-    )
-    path.with_suffix(".json").write_text(
-        json.dumps(
-            {
-                "product": "ES",
-                "split": "train",
-                "context_length": 16,
-                "horizon_length": 6,
-                "stride": 1,
-                "sampling_interval_seconds": 0.5,
-            }
-        )
-    )
-    with pytest.raises(ValueError, match="metadata product"):
-        NpzWindowDataset(
-            path,
-            context_length=16,
-            horizon_length=6,
-            expected_product="ZN",
-            require_metadata=False,
-        )
-
-
-@pytest.mark.parametrize(
-    ("manifest", "context_dtype", "message"),
-    [
-        ({"format": "wrong", "format_version": 1}, np.float32, "bundle format"),
-        (
-            {"format": "timesfm-ft-npy-bundle", "format_version": 1},
-            np.float64,
-            "context_values dtype",
-        ),
-    ],
+from timesfm_ft.data import (
+    ContextBucketBatchSampler,
+    IntradayWindowDataset,
+    collate_intraday_windows,
 )
-def test_bundle_rejects_invalid_manifest_or_dtype(
-    tmp_path, manifest, context_dtype, message
-):
-    bundle = tmp_path / message.replace(" ", "_")
-    bundle.mkdir()
-    arrays = {
-        "context_values": np.ones((2, 16), dtype=context_dtype),
-        "future_values": np.ones((2, 6), dtype=np.float32),
-        "timestamps": np.arange(2, dtype=np.int64),
-        "dates": np.full(2, 20250102, dtype=np.int32),
+
+
+def _dataset(bundle_factory, **overrides):
+    path, dates_path = bundle_factory("bundle")
+    kwargs = {
+        "context_min": 4,
+        "context_max": 8,
+        "horizon_length": 3,
+        "stride": 1,
+        "past_only_features": ("p2",),
+        "past_future_features": ("tod",),
+        "expected_split": "train",
+        "expected_dataset_id": "test_intraday",
+        "expected_product": "TEST",
+        "expected_target_name": "return_1m",
+        "expected_frequency_minutes": 1,
+        "expected_session_minutes": 12,
+        "expected_dates_path": dates_path,
     }
-    for name, value in arrays.items():
-        np.save(bundle / f"{name}.npy", value)
-    (bundle / "manifest.json").write_text(json.dumps(manifest))
-    with pytest.raises(ValueError, match=message):
-        NpzWindowDataset(bundle, context_length=16, horizon_length=6)
+    kwargs.update(overrides)
+    return IntradayWindowDataset(path, **kwargs)
+
+
+def test_dynamic_context_and_future_alignment(bundle_factory):
+    dataset = _dataset(bundle_factory)
+    assert len(dataset) == 12
+    assert dataset.context_lengths.tolist()[:6] == [4, 5, 6, 7, 8, 8]
+    sample = dataset[1]
+    assert sample["context_length"] == 5
+    torch.testing.assert_close(sample["context_values"][0], torch.arange(5, dtype=torch.float32))
+    torch.testing.assert_close(sample["future_values"], torch.tensor([5.0, 6.0, 7.0]))
+    assert sample["past_future_values"].shape == (1, 8)
+    assert sample["date"] == 20250102
+    assert dataset[6]["date"] == 20250103
+
+
+def test_collate_pads_only_to_patch_bucket_and_preserves_known_future(
+    bundle_factory,
+):
+    dataset = _dataset(bundle_factory)
+    batch = collate_intraday_windows(
+        [dataset[1], dataset[2]],
+        patch_length=4,
+    )
+    assert batch["context_values"].shape == (2, 2, 8)
+    assert batch["past_future_values"].shape == (2, 1, 11)
+    assert batch["context_mask"][0, :, :3].all()
+    assert not batch["context_mask"][0, :, 3:].any()
+    torch.testing.assert_close(
+        batch["past_future_values"][0, 0, 8:],
+        dataset[1]["past_future_values"][0, 5:],
+    )
+
+
+def test_bucket_sampler_never_mixes_patch_widths(bundle_factory):
+    dataset = _dataset(bundle_factory)
+    sampler = ContextBucketBatchSampler(
+        dataset,
+        batch_size=3,
+        patch_length=4,
+        shuffle=True,
+        generator=torch.Generator().manual_seed(7),
+    )
+    for indices in sampler:
+        widths = {dataset.padded_context_length(index, patch_length=4) for index in indices}
+        assert len(widths) == 1
+
+
+def test_feature_budget_and_unknown_feature_fail_closed(bundle_factory):
+    with pytest.raises(ValueError, match="unknown past-only"):
+        _dataset(bundle_factory, past_only_features=("missing",))
+    with pytest.raises(ValueError, match="exceeds limit"):
+        _dataset(
+            bundle_factory,
+            past_only_features=("p1", "p2"),
+            max_variates=2,
+        )
+
+
+def test_target_definition_is_part_of_bundle_identity(bundle_factory):
+    path, dates_path = bundle_factory("target-contract")
+    with pytest.raises(ValueError, match="target-definition"):
+        IntradayWindowDataset(
+            path,
+            context_min=4,
+            context_max=8,
+            horizon_length=3,
+            stride=1,
+            expected_target_unit="wrong-unit",
+            expected_dates_path=dates_path,
+        )
+
+
+def test_post_cutoff_past_only_changes_cannot_change_model_inputs(bundle_factory):
+    path, _ = bundle_factory("causal")
+    before = IntradayWindowDataset(
+        path,
+        context_min=4,
+        context_max=8,
+        horizon_length=3,
+        stride=1,
+        past_only_features=("p1",),
+    )[0]["context_values"].clone()
+    values_path = path / "past_only_values.npy"
+    values = np.load(values_path)
+    values[0, :, 4:] = 1_000_000.0
+    np.save(values_path, values)
+    after = IntradayWindowDataset(
+        path,
+        context_min=4,
+        context_max=8,
+        horizon_length=3,
+        stride=1,
+        past_only_features=("p1",),
+    )[0]["context_values"]
+    torch.testing.assert_close(after, before)
+
+
+def test_rejects_non_minute_grid(bundle_factory):
+    path, _ = bundle_factory("bad")
+    timestamps_path = path / "timestamps.npy"
+    timestamps = np.load(timestamps_path)
+    timestamps[0, 3] += 1
+    np.save(timestamps_path, timestamps)
+    with pytest.raises(ValueError, match="exact 1-minute"):
+        IntradayWindowDataset(
+            path,
+            context_min=4,
+            context_max=8,
+            horizon_length=3,
+            stride=1,
+        )

@@ -1,140 +1,118 @@
 from __future__ import annotations
 
 import importlib.util
-from datetime import datetime
+import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from timesfm_ft.data import NpzWindowDataset
+from timesfm_ft.data import IntradayWindowDataset
+
+ROOT = Path(__file__).resolve().parents[1]
+SPEC = importlib.util.spec_from_file_location(
+    "prepare_intraday_splits",
+    ROOT / "scripts/prepare_intraday_splits.py",
+)
+assert SPEC and SPEC.loader
+prepare = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(prepare)
 
 
-def _module():
-    path = (
-        Path(__file__).resolve().parents[1]
-        / "scripts"
-        / "prepare_single_product_splits.py"
-    )
-    spec = importlib.util.spec_from_file_location("prepare_single_product_splits", path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def test_build_split_reads_multiple_parts_and_writes_audited_bundle(tmp_path):
-    module = _module()
-    day = "20250102"
-    source_root = tmp_path / "source"
-    partition = source_root / "ZN" / f"date={day}"
-    partition.mkdir(parents=True)
-    start = int(
-        datetime(2025, 1, 2, 9, 30, tzinfo=ZoneInfo("America/New_York")).timestamp()
-        * 1_000_000_000
-    )
-    timestamps = start + np.arange(25_200, dtype=np.int64) * 500_000_000
-    wmp = 110.0 + np.arange(25_200, dtype=np.float64) * 0.0001
-    table = pa.table({"timestamp_ns": timestamps, "wmp": wmp})
-    pq.write_table(table.slice(0, 12_600), partition / "part0.parquet")
-    pq.write_table(table.slice(12_600), partition / "part1.parquet")
-    date_file = tmp_path / "dates-train.txt"
-    date_file.write_text(f"{day}\n")
-    destination = tmp_path / "train_c16_h8"
-
-    module.build_split(
-        product="ZN",
-        split="train",
-        dates=[day],
-        dates_path=date_file,
-        source_root=str(source_root),
-        destination=destination,
-        context_length=16,
-        horizon_length=8,
-        stride=8,
-        interval_ns=500_000_000,
-    )
-
-    dataset = NpzWindowDataset(
-        destination,
-        context_length=16,
-        horizon_length=8,
-        sampling_interval_seconds=0.5,
-        expected_stride=8,
-        expected_product="ZN",
-        expected_split="train",
-        expected_dates={20250102},
-        expected_dates_path=date_file,
-        require_metadata=True,
-    )
-    assert len(dataset) == len(range(15, 25_192, 8))
-    assert dataset.metadata is not None
-    assert dataset.metadata["date_file_sha256"]
-
-    delta_destination = tmp_path / "train_delta_c16_h8"
-    module.build_split(
-        product="ZN",
-        split="train",
-        dates=[day],
-        dates_path=date_file,
-        source_root=str(source_root),
-        destination=delta_destination,
-        context_length=16,
-        horizon_length=8,
-        stride=8,
-        interval_ns=500_000_000,
-        target_mode="delta_ticks",
-        tick_size=0.01,
-    )
-    delta_dataset = NpzWindowDataset(
-        delta_destination,
-        context_length=16,
-        horizon_length=8,
-        sampling_interval_seconds=0.5,
-        expected_stride=8,
-        expected_product="ZN",
-        expected_split="train",
-        expected_target_mode="delta_ticks",
-        expected_tick_size=0.01,
-        expected_dates={20250102},
-        expected_dates_path=date_file,
-        require_metadata=True,
-    )
-    assert len(delta_dataset) == len(range(16, 25_192, 8))
-    np.testing.assert_allclose(
-        delta_dataset.context_values[0, 0],
-        0.01,
-        rtol=0,
-        atol=1e-5,
-    )
-    np.testing.assert_allclose(
-        delta_dataset.future_values[0],
-        0.01,
-        rtol=0,
-        atol=1e-5,
-    )
-    assert delta_dataset.cutoff_wmp is not None
-    assert delta_dataset.cutoff_wmp[0] == pytest.approx(wmp[16])
-    assert delta_dataset.timestamps is not None
-    assert delta_dataset.timestamps[0] == timestamps[16]
-
-
-def test_session_validation_rejects_truncated_open():
-    module = _module()
-    start = int(
-        datetime(2025, 1, 2, 12, 0, tzinfo=ZoneInfo("America/New_York")).timestamp()
-        * 1_000_000_000
-    )
-    timestamps = start + np.arange(21_600, dtype=np.int64) * 500_000_000
-    with pytest.raises(ValueError, match="starts too late"):
-        module._validate_day(
-            timestamps,
-            np.ones(len(timestamps)),
-            product="ZN",
-            day="20250102",
-            interval_ns=500_000_000,
-            minimum_rows=320,
+def test_prepare_builds_audited_minute_bundle(tmp_path):
+    source = tmp_path / "source"
+    dates = (20250102, 20250103)
+    minutes = 8
+    for date_value in dates:
+        day_dir = source / f"date={date_value}"
+        day_dir.mkdir(parents=True)
+        start = datetime.strptime(str(date_value), "%Y%m%d").replace(tzinfo=timezone.utc)
+        timestamps = np.asarray(
+            [int((start + timedelta(minutes=index)).timestamp() * 1e9) for index in range(minutes)],
+            dtype=np.int64,
         )
+        pq.write_table(
+            pa.table(
+                {
+                    "timestamp_ns": timestamps,
+                    "return_1m": np.arange(minutes, dtype=np.float32),
+                    "feature": np.linspace(0, 1, minutes, dtype=np.float32),
+                }
+            ),
+            day_dir / "part0.parquet",
+        )
+    dates_path = tmp_path / "dates.txt"
+    dates_path.write_text("20250102\n20250103\n")
+    schema_path = tmp_path / "schema.json"
+    schema_path.write_text(
+        json.dumps(
+            {
+                "dataset_id": "prepared",
+                "product": "TEST",
+                "path_template": "date={date}/*.parquet",
+                "timestamp_column": "timestamp_ns",
+                "target": {
+                    "name": "return_1m",
+                    "column": "return_1m",
+                    "unit": "ticks",
+                    "price_source": "wmp",
+                    "return_type": "simple",
+                    "timestamp_semantics": "bar_end",
+                    "availability_lag_minutes": 0,
+                },
+                "session": {
+                    "timezone": "UTC",
+                    "first_bar_time": "00:00:00",
+                    "minutes": minutes,
+                },
+                "past_only_features": [
+                    {
+                        "name": "feature",
+                        "column": "feature",
+                        "family": "state",
+                        "availability_lag_minutes": 1,
+                    }
+                ],
+                "past_future_features": [{"name": "tod", "kind": "sin_time_of_day"}],
+            }
+        )
+    )
+    destination = tmp_path / "bundle"
+    schema = prepare._load_schema(schema_path)
+    prepare.build_split(
+        schema=schema,
+        schema_path=schema_path,
+        source_root=str(source),
+        dates_path=dates_path,
+        split="train",
+        destination=destination,
+        overwrite=False,
+    )
+    dataset = IntradayWindowDataset(
+        destination,
+        context_min=3,
+        context_max=4,
+        horizon_length=2,
+        stride=1,
+        past_only_features=("feature",),
+        past_future_features=("tod",),
+        expected_split="train",
+        expected_dataset_id="prepared",
+        expected_dates_path=dates_path,
+    )
+    assert len(dataset) == 8
+    sample = dataset[0]
+    assert sample["past_future_values"].shape == (1, 5)
+    assert sample["context_mask"][1, 0]
+    assert sample["context_values"][1, 1] == 0.0
+
+
+def test_split_audit_rejects_overlap(tmp_path):
+    (tmp_path / "dates-train.txt").write_text("20250102\n20250103\n")
+    (tmp_path / "dates-val.txt").write_text("20250103\n20250104\n")
+    (tmp_path / "dates-test.txt").write_text("20250105\n")
+    with pytest.raises(ValueError, match="overlap"):
+        prepare.audit_split_files(tmp_path)

@@ -14,7 +14,7 @@ from timesfm_ft.trainer import train_experiment
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="timesfm-ft",
-        description="Fine-tune TimesFM 3 on pre-windowed weighted-mid data.",
+        description="Fine-tune TimesFM 3 on audited 1-minute intraday returns.",
     )
     parser.add_argument(
         "--config",

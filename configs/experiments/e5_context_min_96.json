@@ -1,0 +1,9 @@
+{
+  "extends": "e2_past_future.json",
+  "data": {
+    "context_min": 96
+  },
+  "trainer": {
+    "output_dir": "../../outputs/e5-context-min-96"
+  }
+}

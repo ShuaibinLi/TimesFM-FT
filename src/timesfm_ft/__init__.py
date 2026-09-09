@@ -2,11 +2,11 @@
 
 from timesfm_ft.adapter import TimesFM3Adapter
 from timesfm_ft.config import ExperimentConfig
-from timesfm_ft.losses import ForecastLoss, LossOutput
+from timesfm_ft.losses import LossOutput, PinballLoss
 
 __all__ = [
     "ExperimentConfig",
-    "ForecastLoss",
     "LossOutput",
+    "PinballLoss",
     "TimesFM3Adapter",
 ]

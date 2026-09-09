@@ -1,121 +1,164 @@
 #!/usr/bin/env python3
-"""Creates aligned single-input and multi-input NPZ files for smoke tests."""
+"""Generate small audited intraday bundles for smoke tests."""
 
 from __future__ import annotations
 
 import argparse
+import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
 
+from timesfm_ft.data import BUNDLE_FORMAT, BUNDLE_VERSION
 
-def make_samples(
+REPO_ROOT = Path(__file__).resolve().parents[1]
+PAST_ONLY = (
+    "momentum_5m",
+    "realized_vol_15m",
+    "book_imbalance",
+    "market_return_1m",
+)
+PAST_FUTURE = ("sin_time_of_day", "cos_time_of_day", "time_to_close")
+
+
+def _dates(count: int, start: datetime) -> tuple[list[int], datetime]:
+    result: list[int] = []
+    current = start
+    while len(result) < count:
+        if current.weekday() < 5:
+            result.append(int(current.strftime("%Y%m%d")))
+        current += timedelta(days=1)
+    return result, current
+
+
+def _write_split(
+    destination: Path,
     *,
-    num_samples: int,
-    context_length: int,
-    horizon_length: int,
-    num_variates: int,
-    tick_size: float,
+    split: str,
+    dates: list[int],
+    session_minutes: int,
     seed: int,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> Path:
+    destination.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(seed)
-    total_length = context_length + horizon_length
-    contexts = np.zeros(
-        (num_samples, num_variates, context_length), dtype=np.float32
+    days = len(dates)
+    noise = rng.normal(0.0, 0.35, size=(days, session_minutes)).astype(np.float32)
+    target = np.empty_like(noise)
+    target[:, 0] = noise[:, 0]
+    for minute in range(1, session_minutes):
+        target[:, minute] = 0.15 * target[:, minute - 1] + noise[:, minute]
+    index = np.arange(session_minutes, dtype=np.float32)
+    past = np.empty((days, len(PAST_ONLY), session_minutes), dtype=np.float32)
+    past[:, 0] = np.cumsum(target, axis=1)
+    past[:, 1] = np.sqrt(
+        np.maximum(
+            np.cumsum(target**2, axis=1) / np.arange(1, session_minutes + 1, dtype=np.float32),
+            1e-8,
+        )
     )
-    futures = np.zeros((num_samples, horizon_length), dtype=np.float32)
-
-    for sample_index in range(num_samples):
-        innovations = rng.normal(0.0, 0.08, total_length)
-        returns = np.zeros(total_length, dtype=np.float64)
-        for step in range(1, total_length):
-            returns[step] = 0.2 * returns[step - 1] + innovations[step]
-        price = 100.0 + tick_size * np.cumsum(returns)
-        context_returns = returns[:context_length]
-
-        contexts[sample_index, 0] = price[:context_length]
-        feature_bank = [
-            context_returns,
-            np.tanh(context_returns * 4.0),
-            np.abs(context_returns),
-            rng.lognormal(4.0, 0.4, context_length),
-            np.sign(context_returns) * rng.lognormal(3.0, 0.5, context_length),
-            rng.poisson(8.0, context_length),
-            1.0 + np.abs(context_returns) * 2.0,
-        ]
-        for channel in range(1, num_variates):
-            contexts[sample_index, channel] = feature_bank[(channel - 1) % len(feature_bank)]
-        futures[sample_index] = price[context_length:]
-
-    return contexts, futures
-
-
-def save_split(
-    root: Path,
-    contexts: np.ndarray,
-    futures: np.ndarray,
-    train_count: int,
-    val_count: int,
-) -> None:
-    root.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(
-        root / "train.npz",
-        context_values=contexts[:train_count],
-        future_values=futures[:train_count],
+    past[:, 2] = rng.normal(size=(days, session_minutes))
+    past[:, 3] = 0.4 * target + rng.normal(0.0, 0.4, size=(days, session_minutes))
+    known = np.stack(
+        (
+            np.sin(2 * np.pi * index / session_minutes),
+            np.cos(2 * np.pi * index / session_minutes),
+            (session_minutes - 1 - index) / max(session_minutes - 1, 1),
+        )
+    ).astype(np.float32)
+    known = np.broadcast_to(known[None, :, :], (days, *known.shape)).copy()
+    first_timestamp = int(
+        datetime(2026, 1, 2, 14, 31, tzinfo=timezone.utc).timestamp() * 1_000_000_000
     )
-    np.savez_compressed(
-        root / "val.npz",
-        context_values=contexts[train_count : train_count + val_count],
-        future_values=futures[train_count : train_count + val_count],
+    timestamps = np.asarray(
+        [
+            [
+                first_timestamp + day_index * 86_400_000_000_000 + minute * 60_000_000_000
+                for minute in range(session_minutes)
+            ]
+            for day_index in range(days)
+        ],
+        dtype=np.int64,
     )
-    np.savez_compressed(
-        root / "test.npz",
-        context_values=contexts[train_count + val_count :],
-        future_values=futures[train_count + val_count :],
+    arrays = {
+        "target_values": target,
+        "target_mask": np.zeros_like(target, dtype=np.bool_),
+        "past_only_values": past,
+        "past_only_mask": np.zeros_like(past, dtype=np.bool_),
+        "past_future_values": known,
+        "past_future_mask": np.zeros_like(known, dtype=np.bool_),
+        "timestamps": timestamps,
+        "dates": np.asarray(dates, dtype=np.int32),
+        "session_lengths": np.full(days, session_minutes, dtype=np.int16),
+    }
+    for name, values in arrays.items():
+        np.save(destination / f"{name}.npy", values, allow_pickle=False)
+    dates_path = destination.parent / "reference" / f"dates-{split}.txt"
+    dates_path.parent.mkdir(parents=True, exist_ok=True)
+    dates_path.write_text(
+        "".join(f"{value}\n" for value in dates),
+        encoding="utf-8",
     )
+    import hashlib
+
+    manifest = {
+        "format": BUNDLE_FORMAT,
+        "format_version": BUNDLE_VERSION,
+        "dataset_id": "synthetic_intraday_1min_v1",
+        "product": "SYNTH",
+        "split": split,
+        "target_name": "return_1m",
+        "target": {
+            "name": "return_1m",
+            "unit": "synthetic",
+            "price_source": "synthetic",
+            "return_type": "simple",
+            "timestamp_semantics": "bar_end",
+            "availability_lag_minutes": 0,
+        },
+        "frequency_minutes": 1,
+        "session_minutes": session_minutes,
+        "past_only_features": list(PAST_ONLY),
+        "past_future_features": list(PAST_FUTURE),
+        "date_file_sha256": hashlib.sha256(dates_path.read_bytes()).hexdigest(),
+        "schema": {name: [str(values.dtype), *values.shape] for name, values in arrays.items()},
+    }
+    (destination / "manifest.json").write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return dates_path
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--output-root", default="data")
-    parser.add_argument("--num-samples", type=int, default=64)
-    parser.add_argument("--context-length", type=int, default=256)
-    parser.add_argument("--horizon-length", type=int, default=64)
-    parser.add_argument("--num-variates", type=int, default=8)
-    parser.add_argument("--tick-size", type=float, default=0.01)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--output-root",
+        type=Path,
+        default=REPO_ROOT / "data/synthetic-intraday-1min",
+    )
+    parser.add_argument("--session-minutes", type=int, default=160)
+    parser.add_argument("--train-days", type=int, default=4)
+    parser.add_argument("--val-days", type=int, default=2)
+    parser.add_argument("--test-days", type=int, default=2)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
-    if args.num_samples < 4:
-        raise ValueError("num-samples must be at least 4")
-    if not 2 <= args.num_variates <= 32:
-        raise ValueError("num-variates must be in [2, 32]")
-
-    multi_contexts, futures = make_samples(
-        num_samples=args.num_samples,
-        context_length=args.context_length,
-        horizon_length=args.horizon_length,
-        num_variates=args.num_variates,
-        tick_size=args.tick_size,
-        seed=args.seed,
-    )
-    train_count = max(1, round(args.num_samples * 0.8))
-    val_count = max(1, round(args.num_samples * 0.1))
-    train_count = min(train_count, args.num_samples - 2)
-    val_count = min(val_count, args.num_samples - train_count - 1)
-    test_count = args.num_samples - train_count - val_count
-    output_root = Path(args.output_root)
-    save_split(output_root / "multi", multi_contexts, futures, train_count, val_count)
-    save_split(
-        output_root / "single",
-        multi_contexts[:, :1, :],
-        futures,
-        train_count,
-        val_count,
-    )
-    print(
-        f"saved {train_count} train, {val_count} validation, and {test_count} test "
-        f"samples under {output_root}"
-    )
+    current = datetime(2026, 1, 2)
+    for offset, (split, count) in enumerate(
+        (
+            ("train", args.train_days),
+            ("val", args.val_days),
+            ("test", args.test_days),
+        )
+    ):
+        dates, current = _dates(count, current)
+        _write_split(
+            args.output_root / split,
+            split=split,
+            dates=dates,
+            session_minutes=args.session_minutes,
+            seed=args.seed + offset,
+        )
 
 
 if __name__ == "__main__":

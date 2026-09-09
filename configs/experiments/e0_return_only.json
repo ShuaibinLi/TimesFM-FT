@@ -1,0 +1,6 @@
+{
+  "extends": "_base.json",
+  "trainer": {
+    "output_dir": "../../outputs/e0-return-only"
+  }
+}

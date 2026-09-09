@@ -1,4 +1,4 @@
-"""Inference and evaluation for fine-tuned TimesFM 3 adapters."""
+"""Zero-shot and adapted evaluation for 1-minute intraday forecasts."""
 
 from __future__ import annotations
 
@@ -6,50 +6,25 @@ import csv
 import json
 import logging
 from pathlib import Path
-from typing import Any, Literal
+from typing import Literal
 
-import torch
-from torch.utils.data import DataLoader
+import numpy as np
 
 from timesfm_ft.adapter import TimesFM3Adapter
 from timesfm_ft.config import ExperimentConfig
-from timesfm_ft.data import NpzWindowDataset, WindowBatch
 from timesfm_ft.metrics import ForecastMetricsAccumulator
-from timesfm_ft.trainer import resolve_device
+from timesfm_ft.trainer import _dataset, _make_loader, _move_batch, resolve_device
 
 LOGGER = logging.getLogger(__name__)
 
-# Backward-compatible import surface for existing callers and tests.
-EvaluationAccumulator = ForecastMetricsAccumulator
 
-
-def _read_expected_dates(path: str | None) -> set[int] | None:
-    if path is None:
-        return None
-    date_path = Path(path)
-    return {
-        int(line.strip())
-        for line in date_path.read_text(encoding="utf-8").splitlines()
-        if line.strip() and not line.startswith("#")
-    }
-
-
-def _move_batch(batch: WindowBatch, device: torch.device) -> WindowBatch:
-    return {
-        key: value.to(device, non_blocking=device.type == "cuda")
-        for key, value in batch.items()
-    }
-
-
-def _read_dataset_metadata(path: Path) -> dict[str, Any] | None:
-    metadata_path = path / "manifest.json" if path.is_dir() else path.with_suffix(".json")
-    if not metadata_path.exists():
-        return None
-    with metadata_path.open(encoding="utf-8") as handle:
-        metadata = json.load(handle)
-    if not isinstance(metadata, dict):
-        raise ValueError(f"dataset metadata must be an object: {metadata_path}")
-    return metadata
+def _write_rows(path: Path, rows: list[dict[str, object]]) -> None:
+    if not rows:
+        return
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
 
 
 def evaluate_experiment(
@@ -61,100 +36,39 @@ def evaluate_experiment(
     batch_size: int | None = None,
     device_name: str | None = None,
     split: Literal["val", "test"] | None = None,
-    allow_unsafe_data: bool = False,
 ) -> Path:
-    """Loads the official model, optionally applies an adapter, and evaluates."""
+    """Evaluates a chronological validation/test bundle and writes all reports."""
 
     config.validate()
-    device = resolve_device(device_name or config.trainer.device)
     if data_path is not None and split is not None:
         raise ValueError("data_path and split are mutually exclusive")
-    selected_split: Literal["val", "test"] | None
+    selected_split: Literal["val", "test"]
     if data_path is not None:
         selected_path = Path(data_path)
         if selected_path.resolve() == Path(config.data.train_path).resolve():
             raise ValueError("evaluation on data.train_path is not allowed")
-        metadata = _read_dataset_metadata(selected_path)
-        if allow_unsafe_data:
-            selected_split = None
-            expected_dates = None
-            expected_dates_path = None
-        else:
-            if metadata is None:
-                raise ValueError(
-                    "explicit evaluation data requires metadata; "
-                    "pass --unsafe-data to bypass provenance checks"
-                )
-            declared_split = metadata.get("split")
-            if declared_split not in {"val", "test"}:
-                raise ValueError(
-                    f"explicit evaluation data declares split={declared_split!r}; "
-                    "only val/test are allowed"
-                )
-            selected_split = declared_split
-            if selected_split == "test":
-                expected_dates_path = config.data.test_dates_path
-            else:
-                expected_dates_path = config.data.val_dates_path
-            expected_dates = _read_expected_dates(expected_dates_path)
+        metadata_path = selected_path / "manifest.json"
+        if not metadata_path.exists():
+            raise ValueError("explicit evaluation data requires manifest.json")
+        with metadata_path.open(encoding="utf-8") as handle:
+            declared_split = json.load(handle).get("split")
+        if declared_split not in {"val", "test"}:
+            raise ValueError("explicit evaluation bundle must declare val or test")
+        selected_split = declared_split
+        dates_path = (
+            config.data.test_dates_path if selected_split == "test" else config.data.val_dates_path
+        )
     else:
         selected_split = split or ("test" if config.data.test_path else "val")
         if selected_split == "test":
             if config.data.test_path is None:
-                raise ValueError("data.test_path is required for --split test")
+                raise ValueError("data.test_path is required for test evaluation")
             selected_path = Path(config.data.test_path)
-            expected_dates = _read_expected_dates(config.data.test_dates_path)
-            expected_dates_path = config.data.test_dates_path
+            dates_path = config.data.test_dates_path
         else:
             selected_path = Path(config.data.val_path)
-            expected_dates = _read_expected_dates(config.data.val_dates_path)
-            expected_dates_path = config.data.val_dates_path
-    dataset = NpzWindowDataset(
-        selected_path,
-        context_length=config.data.context_length,
-        horizon_length=config.data.horizon_length,
-        max_variates=config.data.max_variates,
-        sampling_interval_seconds=(
-            None
-            if data_path is not None and allow_unsafe_data
-            else config.data.sampling_interval_seconds
-        ),
-        expected_stride=(
-            None
-            if data_path is not None and allow_unsafe_data
-            else config.data.stride
-        ),
-        expected_product=(
-            None
-            if data_path is not None and allow_unsafe_data
-            else config.data.product
-        ),
-        expected_split=selected_split,
-        expected_target_mode=(
-            None
-            if data_path is not None and allow_unsafe_data
-            else config.data.target_mode
-        ),
-        expected_tick_size=(
-            None
-            if data_path is not None and allow_unsafe_data
-            else config.objective.tick_size
-        ),
-        expected_dates=expected_dates,
-        expected_dates_path=expected_dates_path,
-        require_metadata=(
-            config.data.require_metadata
-            or (data_path is not None and not allow_unsafe_data)
-        ),
-    )
-    loader = DataLoader(
-        dataset,
-        batch_size=batch_size or config.trainer.batch_size,
-        shuffle=False,
-        num_workers=config.trainer.num_workers,
-        pin_memory=device.type == "cuda",
-    )
-
+            dates_path = config.data.val_dates_path
+    device = resolve_device(device_name or config.trainer.device)
     model = TimesFM3Adapter.from_pretrained(
         config.model,
         config.adapter,
@@ -165,25 +79,39 @@ def evaluate_experiment(
     if adapter_path is not None:
         model.load_adapter(adapter_path)
     model.eval()
+    dataset = _dataset(
+        config,
+        path=str(selected_path),
+        split=selected_split,
+        dates_path=dates_path,
+    )
+    loader = _make_loader(
+        dataset,
+        batch_size=batch_size or config.trainer.batch_size,
+        patch_length=int(model.backbone.input_patch_len),
+        shuffle=False,
+        num_workers=config.trainer.num_workers,
+        pin_memory=device.type == "cuda",
+        generator=None,
+    )
     accumulator = ForecastMetricsAccumulator(
         horizon=config.data.horizon_length,
         quantiles=model.quantiles,
-        tick_size=config.objective.tick_size,
-        sampling_interval_seconds=config.data.sampling_interval_seconds,
-        target_mode=config.data.target_mode,
+        report_horizons=config.evaluation.report_horizons,
+        trading_horizon=config.evaluation.trading_horizon,
+        cost_per_turnover=config.evaluation.cost_per_turnover,
     )
-
     LOGGER.info(
-        "eval_start checkpoint=%s adapter=%s data=%s samples=%d variates=%d "
-        "context=%d horizon=%d device=%s",
+        "eval_start checkpoint=%s adapter=%s split=%s samples=%d variates=%d "
+        "context=%d..%d horizon=%d",
         config.model.checkpoint,
         adapter_path or "zero-shot",
-        selected_path,
+        selected_split,
         len(dataset),
         dataset.num_variates,
-        config.data.context_length,
+        config.data.context_min,
+        config.data.context_max,
         config.data.horizon_length,
-        device,
     )
     for step, raw_batch in enumerate(loader, start=1):
         batch = _move_batch(raw_batch, device)
@@ -191,48 +119,62 @@ def evaluate_experiment(
             batch["context_values"],
             horizon=config.data.horizon_length,
             context_mask=batch["context_mask"],
+            past_future_values=batch["past_future_values"],
+            past_future_mask=batch["past_future_mask"],
         )
         accumulator.update(
             predictions,
             batch["future_values"],
-            batch["context_values"][:, 0, -1],
             batch["future_mask"],
+            last_returns=batch["last_returns"],
+            context_lengths=batch["context_lengths"],
+            dates=batch["dates"],
+            timestamps=batch["timestamps"],
+            minute_indices=batch["minute_indices"],
+            context_volatility=batch["context_volatility"],
         )
         if step % config.trainer.log_every_steps == 0 or step == len(loader):
             LOGGER.info("eval_progress step=%d/%d", step, len(loader))
 
-    summary, horizon_rows = accumulator.results()
-    summary["evaluated_split"] = selected_split or "explicit"
-    summary["data_path"] = str(selected_path)
-    destination = Path(output_dir or Path(config.trainer.output_dir) / "evaluation")
+    summary, lead_rows, cumulative_rows, slice_rows = accumulator.results()
+    summary.update(
+        {
+            "evaluated_split": selected_split,
+            "data_path": str(selected_path),
+            "dataset_id": config.data.dataset_id,
+            "target_name": config.data.target_name,
+            "target_unit": config.data.target_unit,
+            "past_only_features": config.data.past_only_features,
+            "past_future_features": config.data.past_future_features,
+        }
+    )
+    destination = Path(
+        output_dir or Path(config.trainer.output_dir) / f"evaluation-{selected_split}"
+    )
     destination.mkdir(parents=True, exist_ok=True)
     with (destination / "summary.json").open("w", encoding="utf-8") as handle:
         json.dump(summary, handle, indent=2, sort_keys=True, allow_nan=False)
-    with (destination / "per_horizon.csv").open(
-        "w", encoding="utf-8", newline=""
-    ) as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(horizon_rows[0]))
-        writer.writeheader()
-        writer.writerows(horizon_rows)
+    _write_rows(destination / "per_lead.csv", lead_rows)
+    _write_rows(destination / "cumulative_horizons.csv", cumulative_rows)
+    _write_rows(destination / "slices.csv", slice_rows)
+    if config.evaluation.save_predictions:
+        np.savez(
+            destination / "predictions.npz",
+            **accumulator.prediction_arrays(),
+        )
 
-    metric_text = {
-        key: f"{value:.6f}" if value is not None else "null"
-        for key, value in {
-            "mae": summary["mae_ticks"],
-            "rmse": summary["rmse_ticks"],
-            "r2": summary["oos_r2_vs_persistence"],
-            "pinball": summary["mean_pinball_ticks"],
-            "crossing": summary["quantile_crossing_rate"],
-        }.items()
-    }
+    cumulative_lookup = {row["horizon_minutes"]: row for row in cumulative_rows}
+    trading_row = cumulative_lookup.get(config.evaluation.trading_horizon, {})
     LOGGER.info(
-        "eval_end mae_ticks=%s rmse_ticks=%s oos_r2=%s "
-        "pinball_ticks=%s crossing_rate=%s artifacts=%s",
-        metric_text["mae"],
-        metric_text["rmse"],
-        metric_text["r2"],
-        metric_text["pinball"],
-        metric_text["crossing"],
+        "eval_end pinball=%s rank_ic_%dm=%s net_utility=%s artifacts=%s",
+        (f"{summary['mean_pinball']:.6f}" if summary["mean_pinball"] is not None else "null"),
+        config.evaluation.trading_horizon,
+        (f"{trading_row['rank_ic']:.6f}" if trading_row.get("rank_ic") is not None else "null"),
+        (
+            f"{summary['trading_proxy']['net_mean']:.6f}"
+            if summary["trading_proxy"]["net_mean"] is not None
+            else "null"
+        ),
         destination,
     )
     return destination

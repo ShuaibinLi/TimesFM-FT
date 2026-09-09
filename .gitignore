@@ -10,6 +10,8 @@ build/
 data/
 outputs/
 checkpoints/
+_archived/*/data/
+_archived/*/outputs/
 *.pt
 *.pth
 *.safetensors

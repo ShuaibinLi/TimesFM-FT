@@ -1,7 +1,7 @@
 [project]
 name = "timesfm-ft"
 version = "0.1.0"
-description = "Research fine-tuning toolkit for TimesFM 3."
+description = "TimesFM 3 research toolkit for dynamic-context 1-minute intraday returns."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -19,6 +19,9 @@ dependencies = [
 dev = [
   "pytest>=8",
   "ruff>=0.8",
+]
+baselines = [
+  "lightgbm>=4.5",
 ]
 
 [project.scripts]

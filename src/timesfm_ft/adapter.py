@@ -41,9 +41,7 @@ class LoRALinear(nn.Module):
             parameter.requires_grad = False
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        return self.base(inputs) + self.scaling * self.lora_b(
-            self.lora_a(self.dropout(inputs))
-        )
+        return self.base(inputs) + self.scaling * self.lora_b(self.lora_a(self.dropout(inputs)))
 
 
 def _set_trainable(module: nn.Module, trainable: bool) -> None:
@@ -283,17 +281,21 @@ class TimesFM3Adapter(nn.Module):
         *,
         horizon: int,
         context_mask: torch.Tensor | None = None,
+        past_future_values: torch.Tensor | None = None,
+        past_future_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Forecasts weighted-mid with optional past-only covariates.
+        """Forecasts target returns with past-only and known-future covariates.
 
-        Variate zero is the weighted-mid target; all remaining variates are
-        passed to the official model as past-only covariates.
+        Variate zero is the target return. Remaining ``context_values`` are
+        past-only; ``past_future_values`` covers context plus the full horizon.
         """
 
         decode_kwargs = self._prepare_decode_inputs(
             context_values,
             horizon=horizon,
             context_mask=context_mask,
+            past_future_values=past_future_values,
+            past_future_mask=past_future_mask,
         )
         with self._autocast_context():
             all_quantiles = self._decode_impl(self.backbone, **decode_kwargs)
@@ -306,6 +308,8 @@ class TimesFM3Adapter(nn.Module):
         *,
         horizon: int,
         context_mask: torch.Tensor | None = None,
+        past_future_values: torch.Tensor | None = None,
+        past_future_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Runs inference through the official ``TimesFM3Torch.decode`` method."""
 
@@ -313,6 +317,8 @@ class TimesFM3Adapter(nn.Module):
             context_values,
             horizon=horizon,
             context_mask=context_mask,
+            past_future_values=past_future_values,
+            past_future_mask=past_future_mask,
         )
         with self._autocast_context():
             all_quantiles = self.backbone.decode(**decode_kwargs)
@@ -324,22 +330,57 @@ class TimesFM3Adapter(nn.Module):
         *,
         horizon: int,
         context_mask: torch.Tensor | None,
+        past_future_values: torch.Tensor | None = None,
+        past_future_mask: torch.Tensor | None = None,
     ) -> dict[str, Any]:
         if context_values.ndim != 3:
             raise ValueError("context_values must have shape (batch, variates, context)")
-        if context_values.shape[1] > 32:
-            raise ValueError("TimesFM 3 supports at most 32 variates per forward")
         if horizon <= 0:
             raise ValueError("horizon must be positive")
         if context_mask is not None and context_mask.shape != context_values.shape:
             raise ValueError("context_mask must match context_values")
+        known_variates = 0
+        if past_future_values is not None:
+            if past_future_values.ndim != 3:
+                raise ValueError(
+                    "past_future_values must have shape (batch, variates, context+horizon)"
+                )
+            expected_shape = (
+                context_values.shape[0],
+                past_future_values.shape[1],
+                context_values.shape[2] + horizon,
+            )
+            if past_future_values.shape != expected_shape:
+                raise ValueError(
+                    f"past_future_values shape={past_future_values.shape}, "
+                    f"expected {expected_shape}"
+                )
+            if past_future_mask is not None and past_future_mask.shape != past_future_values.shape:
+                raise ValueError("past_future_mask must match past_future_values")
+            known_variates = past_future_values.shape[1]
+        elif past_future_mask is not None:
+            raise ValueError("past_future_mask requires past_future_values")
+        total_variates = context_values.shape[1] + known_variates
+        if total_variates > 32:
+            raise ValueError("TimesFM 3 supports at most 32 variates per forward")
 
         context_values = self._stabilize_constant_patches(
             context_values,
             context_mask,
         )
+        if past_future_values is not None and known_variates:
+            context_length = context_values.shape[-1]
+            stable_known_context = self._stabilize_constant_patches(
+                past_future_values[..., :context_length],
+                (past_future_mask[..., :context_length] if past_future_mask is not None else None),
+            )
+            past_future_values = torch.cat(
+                (stable_known_context, past_future_values[..., context_length:]),
+                dim=-1,
+            )
         target = context_values[:, :1, :]
         target_mask = context_mask[:, :1, :] if context_mask is not None else None
+        global_mask = context_mask[:, 0, :] if context_mask is not None else None
         covariates = context_values[:, 1:, :] if context_values.shape[1] > 1 else None
         covariate_mask = (
             context_mask[:, 1:, :]
@@ -352,6 +393,9 @@ class TimesFM3Adapter(nn.Module):
             "past_only_covariates": covariates,
             "target_mask": target_mask,
             "past_only_mask": covariate_mask,
+            "mask": global_mask,
+            "past_future_covariates": (past_future_values if known_variates else None),
+            "past_future_mask": (past_future_mask if known_variates else None),
         }
 
     def _stabilize_constant_patches(
@@ -389,11 +433,7 @@ class TimesFM3Adapter(nn.Module):
             torch.maximum(maximum.abs(), torch.ones_like(maximum)),
             torch.ones_like(maximum),
         )
-        amplitude = (
-            scale
-            * torch.finfo(values.dtype).eps
-            * 4.0
-        ).detach()
+        amplitude = (scale * torch.finfo(values.dtype).eps * 4.0).detach()
         pattern = torch.linspace(
             -1.0,
             0.0,
@@ -401,12 +441,7 @@ class TimesFM3Adapter(nn.Module):
             dtype=values.dtype,
             device=values.device,
         )
-        perturbation = (
-            constant[..., None]
-            * valid
-            * amplitude[..., None]
-            * pattern
-        )
+        perturbation = constant[..., None] * valid * amplitude[..., None] * pattern
         return (patches + perturbation).reshape_as(values)
 
     def trainable_state_dict(self) -> dict[str, torch.Tensor]:
@@ -428,9 +463,7 @@ class TimesFM3Adapter(nn.Module):
             "quantiles": self.quantiles,
             "parameter_summary": self.parameter_summary,
             "use_linear_detrending": bool(self.backbone.use_linear_detrending),
-            "use_iterative_cpm_revin": bool(
-                self.backbone.use_iterative_cpm_revin
-            ),
+            "use_iterative_cpm_revin": bool(self.backbone.use_iterative_cpm_revin),
         }
 
     def save_adapter(
@@ -468,9 +501,7 @@ class TimesFM3Adapter(nn.Module):
             "trainable_names": list(self.trainable_names),
             "quantiles": list(self.quantiles),
             "use_linear_detrending": bool(self.backbone.use_linear_detrending),
-            "use_iterative_cpm_revin": bool(
-                self.backbone.use_iterative_cpm_revin
-            ),
+            "use_iterative_cpm_revin": bool(self.backbone.use_iterative_cpm_revin),
         }
         for key, expected_value in expected_metadata.items():
             if metadata.get(key) != expected_value:
@@ -491,9 +522,7 @@ class TimesFM3Adapter(nn.Module):
         """Load an already-deserialized trainable-only state dictionary."""
 
         expected = {
-            name
-            for name, parameter in self.backbone.named_parameters()
-            if parameter.requires_grad
+            name for name, parameter in self.backbone.named_parameters() if parameter.requires_grad
         }
         received = set(state)
         if received != expected:

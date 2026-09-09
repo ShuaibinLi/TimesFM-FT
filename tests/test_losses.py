@@ -3,117 +3,35 @@ from __future__ import annotations
 import pytest
 import torch
 
-from timesfm_ft.losses import ForecastLoss
+from timesfm_ft.losses import PinballLoss
 
 
-def _loss() -> ForecastLoss:
-    return ForecastLoss(
-        [0.1, 0.5, 0.9],
-        tick_size=0.01,
-        pinball_weight=1.0,
-        median_huber_weight=1.0,
-        crossing_weight=0.1,
-    )
-
-
-def test_balanced_objective_excludes_median_from_pinball():
-    target = torch.tensor([[100.0]])
-    predictions = torch.tensor([[[100.0, 100.01, 100.0]]])
-    output = _loss()(
-        predictions,
-        target,
-        current_price=torch.tensor([100.0]),
-    )
-    assert output.pinball == 0.0
-    assert output.median_huber > 0.0
-
-
-def test_pinball_only_objective_includes_median():
-    target = torch.tensor([[100.0]])
-    predictions = torch.tensor([[[100.0, 100.01, 100.0]]])
-    loss = ForecastLoss(
-        [0.1, 0.5, 0.9],
-        tick_size=0.01,
-        include_median_in_pinball=True,
-        median_huber_weight=0.0,
-        crossing_weight=0.0,
-    )
-    output = loss(
-        predictions,
-        target,
-        current_price=torch.tensor([100.0]),
-    )
-    assert loss.pinball_quantile_count == 3
-    assert output.pinball > 0.0
-    torch.testing.assert_close(output.total, output.pinball)
-
-
-def test_delta_tick_mode_compares_direct_increment_values():
-    target = torch.tensor([[0.25, -0.5]])
+def test_pinball_is_zero_for_perfect_forecast():
+    target = torch.tensor([[0.5, -0.25]])
     predictions = target[:, :, None].repeat(1, 1, 3)
-    loss = ForecastLoss(
-        [0.1, 0.5, 0.9],
-        tick_size=0.015625,
-        target_mode="delta_ticks",
-        include_median_in_pinball=True,
-        median_huber_weight=0.0,
-        crossing_weight=0.0,
-    )
-    output = loss(
-        predictions,
-        target,
-        current_price=torch.tensor([999.0]),
-    )
+    output = PinballLoss([0.1, 0.5, 0.9])(predictions, target)
     torch.testing.assert_close(output.total, torch.tensor(0.0))
 
 
-def test_loss_computes_in_float32_and_respects_mask():
-    target = torch.tensor([[100.01, 100.02]])
-    predictions = target[:, :, None].repeat(1, 1, 3).to(torch.bfloat16)
-    output = _loss()(
-        predictions,
+def test_pinball_respects_target_mask_and_uses_float32():
+    target = torch.tensor([[1.0, 100.0]])
+    predictions = torch.tensor([[[0.0, 0.0, 0.0], [float("nan")] * 3]])
+    output = PinballLoss([0.1, 0.5, 0.9])(
+        predictions.to(torch.bfloat16),
         target,
-        current_price=torch.tensor([100.0]),
         target_mask=torch.tensor([[False, True]]),
     )
     assert output.total.dtype == torch.float32
     assert torch.isfinite(output.total)
 
 
-def test_crossing_penalty_detects_adjacent_quantile_inversion():
-    target = torch.tensor([[100.0]])
-    predictions = torch.tensor([[[100.02, 100.01, 100.00]]])
-    output = _loss()(
-        predictions,
-        target,
-        current_price=torch.tensor([100.0]),
-    )
-    assert output.crossing > 0.0
-
-
-def test_all_masked_batch_is_rejected():
-    with pytest.raises(ValueError, match="no valid target"):
-        _loss()(
-            torch.ones(1, 1, 3),
-            torch.ones(1, 1),
-            current_price=torch.ones(1),
-            target_mask=torch.ones(1, 1, dtype=torch.bool),
+def test_pinball_rejects_bad_quantiles_and_all_masked_batch():
+    with pytest.raises(ValueError, match="strictly increasing"):
+        PinballLoss([0.5, 0.1])
+    loss = PinballLoss([0.1, 0.5, 0.9])
+    with pytest.raises(ValueError, match="no valid"):
+        loss(
+            torch.zeros(1, 2, 3),
+            torch.zeros(1, 2),
+            target_mask=torch.ones(1, 2, dtype=torch.bool),
         )
-
-
-@pytest.mark.parametrize(
-    ("kwargs", "message"),
-    [
-        ({"quantiles": [0.0, 0.5, 0.9]}, "in \\(0, 1\\)"),
-        ({"quantiles": [0.1, 0.5, 1.0]}, "in \\(0, 1\\)"),
-        ({"quantiles": [0.1, float("nan"), 0.9]}, "finite"),
-        (
-            {"quantiles": [0.1, 0.5, 0.9], "huber_delta_ticks": 0.0},
-            "huber_delta_ticks",
-        ),
-    ],
-)
-def test_loss_rejects_invalid_parameters(kwargs, message):
-    kwargs.setdefault("tick_size", 0.01)
-    with pytest.raises(ValueError, match=message):
-        ForecastLoss(**kwargs)

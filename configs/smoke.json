@@ -1,0 +1,70 @@
+{
+  "data": {
+    "train_path": "../data/synthetic-intraday-1min/train",
+    "val_path": "../data/synthetic-intraday-1min/val",
+    "test_path": "../data/synthetic-intraday-1min/test",
+    "dataset_id": "synthetic_intraday_1min_v1",
+    "product": "SYNTH",
+    "target_name": "return_1m",
+    "target_unit": "synthetic",
+    "target_price_source": "synthetic",
+    "target_return_type": "simple",
+    "target_timestamp_semantics": "bar_end",
+    "target_availability_lag_minutes": 0,
+    "frequency_minutes": 1,
+    "context_min": 64,
+    "context_max": 96,
+    "horizon_length": 16,
+    "stride": 8,
+    "session_minutes": 160,
+    "max_variates": 8,
+    "past_only_features": [
+      "momentum_5m",
+      "realized_vol_15m",
+      "book_imbalance",
+      "market_return_1m"
+    ],
+    "past_future_features": [
+      "sin_time_of_day",
+      "cos_time_of_day",
+      "time_to_close"
+    ],
+    "train_dates_path": "../data/synthetic-intraday-1min/reference/dates-train.txt",
+    "val_dates_path": "../data/synthetic-intraday-1min/reference/dates-val.txt",
+    "test_dates_path": "../data/synthetic-intraday-1min/reference/dates-test.txt",
+    "require_metadata": true
+  },
+  "model": {
+    "checkpoint": "google/timesfm-3.0-pytorch",
+    "disable_linear_detrending": false,
+    "disable_iterative_cpm_revin": true
+  },
+  "adapter": {
+    "type": "head",
+    "last_n_layers": 1
+  },
+  "objective": {
+    "name": "pinball"
+  },
+  "trainer": {
+    "output_dir": "../outputs/smoke",
+    "epochs": 1,
+    "batch_size": 4,
+    "max_grad_norm": 1.0,
+    "num_workers": 0,
+    "gradient_accumulation_steps": 1,
+    "log_every_steps": 5,
+    "seed": 42,
+    "device": "cpu",
+    "dtype": "float32",
+    "deterministic": false,
+    "early_stopping_patience": null,
+    "checkpoint_metric": "mean_pinball"
+  },
+  "evaluation": {
+    "report_horizons": [1, 5, 10, 16],
+    "trading_horizon": 16,
+    "cost_per_turnover": 0.0,
+    "save_predictions": false
+  }
+}

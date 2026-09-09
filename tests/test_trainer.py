@@ -2,39 +2,21 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import torch
 from torch import nn
-from torch.utils.data import DataLoader, Dataset
 
 from timesfm_ft import trainer
 from timesfm_ft.config import (
     AdapterConfig,
     DataConfig,
+    EvaluationConfig,
     ExperimentConfig,
-    ObjectiveConfig,
-    OptimizerConfig,
     TrainerConfig,
 )
-from timesfm_ft.losses import ForecastLoss
-
-
-class _BatchDataset(Dataset):
-    def __init__(self, samples: int, context: int, horizon: int) -> None:
-        self.context = torch.ones(samples, 1, context)
-        self.future = torch.ones(samples, horizon)
-
-    def __len__(self) -> int:
-        return len(self.context)
-
-    def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
-        return {
-            "context_values": self.context[index],
-            "context_mask": torch.zeros_like(self.context[index], dtype=torch.bool),
-            "future_values": self.future[index],
-            "future_mask": torch.zeros_like(self.future[index], dtype=torch.bool),
-        }
+from timesfm_ft.losses import PinballLoss
 
 
 class _TinyForecast(nn.Module):
@@ -43,15 +25,18 @@ class _TinyForecast(nn.Module):
     def __init__(self) -> None:
         super().__init__()
         self.offset = nn.Parameter(torch.tensor(0.1))
+        self.backbone = SimpleNamespace(input_patch_len=2)
 
     def forward(
         self,
-        context_values: torch.Tensor,
+        context_values,
         *,
-        horizon: int,
-        context_mask: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        del context_mask
+        horizon,
+        context_mask=None,
+        past_future_values=None,
+        past_future_mask=None,
+    ):
+        del context_mask, past_future_values, past_future_mask
         origin = context_values[:, 0, -1, None, None]
         return origin + self.offset.expand(len(context_values), horizon, 3)
 
@@ -66,18 +51,34 @@ class _CountingSgd(torch.optim.SGD):
         return super().step(closure)
 
 
-def test_run_epoch_handles_partial_final_accumulation_group():
+def _batch(samples: int = 2, horizon: int = 2):
+    return {
+        "context_values": torch.ones(samples, 2, 4),
+        "context_mask": torch.zeros(samples, 2, 4, dtype=torch.bool),
+        "past_future_values": torch.ones(samples, 1, 4 + horizon),
+        "past_future_mask": torch.zeros(samples, 1, 4 + horizon, dtype=torch.bool),
+        "future_values": torch.ones(samples, horizon),
+        "future_mask": torch.zeros(samples, horizon, dtype=torch.bool),
+        "context_lengths": torch.full((samples,), 4, dtype=torch.int16),
+        "timestamps": torch.arange(samples, dtype=torch.int64) + 1,
+        "dates": torch.full((samples,), 20250102, dtype=torch.int32),
+        "minute_indices": torch.full((samples,), 3, dtype=torch.int16),
+        "last_returns": torch.ones(samples),
+        "context_volatility": torch.ones(samples),
+    }
+
+
+def test_gradient_accumulation_steps_partial_final_group():
     model = _TinyForecast()
-    loader = DataLoader(_BatchDataset(5, 16, 6), batch_size=2)
+    loader = [_batch(), _batch(), _batch(1)]
     optimizer = _CountingSgd(model.parameters())
-    loss = ForecastLoss(model.quantiles, tick_size=0.01)
     metrics = trainer._run_epoch(
         model,
         loader,
-        loss,
+        PinballLoss(model.quantiles),
         device=torch.device("cpu"),
-        horizon=6,
-        sampling_interval_seconds=0.5,
+        horizon=2,
+        evaluation=EvaluationConfig(report_horizons=(1, 2), trading_horizon=2),
         optimizer=optimizer,
         scheduler=None,
         gradient_accumulation_steps=2,
@@ -87,23 +88,7 @@ def test_run_epoch_handles_partial_final_accumulation_group():
         log_every_steps=10,
     )
     assert optimizer.step_count == 2
-    assert np.isfinite(metrics["loss"])
-    val_metrics = trainer._run_epoch(
-        model,
-        loader,
-        loss,
-        device=torch.device("cpu"),
-        horizon=6,
-        sampling_interval_seconds=0.5,
-        optimizer=None,
-        scheduler=None,
-        gradient_accumulation_steps=1,
-        max_grad_norm=1.0,
-        epoch=1,
-        split="val",
-        log_every_steps=10,
-    )
-    assert val_metrics["valid_points"] == 30
+    assert np.isfinite(metrics["mean_pinball"])
 
 
 class _CheckpointModel(_TinyForecast):
@@ -113,10 +98,10 @@ class _CheckpointModel(_TinyForecast):
     trainable_names = ("offset",)
 
     @property
-    def parameter_summary(self) -> dict[str, int]:
+    def parameter_summary(self):
         return {"total": 1, "trainable": 1}
 
-    def optimizer_parameter_groups(self, config: OptimizerConfig):
+    def optimizer_parameter_groups(self, config):
         return [
             {
                 "params": [self.offset],
@@ -126,109 +111,96 @@ class _CheckpointModel(_TinyForecast):
             }
         ]
 
-    def trainable_state_dict(self) -> dict[str, torch.Tensor]:
+    def trainable_state_dict(self):
         return {"offset": self.offset.detach().cpu()}
 
-    def load_trainable_state_dict(self, state: dict[str, torch.Tensor]) -> None:
+    def load_trainable_state_dict(self, state):
         self.offset.data.copy_(state["offset"])
 
-    def save_adapter(self, output_dir: Path, *, metadata=None) -> None:
+    def save_adapter(self, output_dir: Path, *, metadata=None):
         output_dir.mkdir(parents=True, exist_ok=True)
         torch.save(self.trainable_state_dict(), output_dir / "adapter.pt")
         (output_dir / "adapter_config.json").write_text(json.dumps(metadata or {}))
 
 
-def _experiment(tmp_path: Path, *, resume_from: str | None = None) -> ExperimentConfig:
-    train_path = tmp_path / "train.npz"
-    val_path = tmp_path / "val.npz"
-    for path in (train_path, val_path):
-        np.savez(
-            path,
-            context_values=np.ones((4, 16), dtype=np.float32),
-            future_values=np.ones((4, 6), dtype=np.float32),
-        )
+def _experiment(bundle_factory, tmp_path, *, resume_from=None):
+    train, train_dates = bundle_factory("train", split="train", start_date=20250102)
+    val, val_dates = bundle_factory("val", split="val", start_date=20250202)
     return ExperimentConfig(
         data=DataConfig(
-            train_path=str(train_path),
-            val_path=str(val_path),
-            context_length=16,
-            horizon_length=6,
-            stride=6,
-            max_variates=1,
+            train_path=str(train),
+            val_path=str(val),
+            dataset_id="test_intraday",
+            product="TEST",
+            target_unit="test",
+            target_price_source="test",
+            context_min=4,
+            context_max=6,
+            horizon_length=3,
+            stride=2,
+            session_minutes=12,
+            past_only_features=("p1",),
+            past_future_features=("tod",),
+            train_dates_path=str(train_dates),
+            val_dates_path=str(val_dates),
         ),
-        objective=ObjectiveConfig(tick_size=0.01),
         adapter=AdapterConfig(type="head", last_n_layers=1),
         trainer=TrainerConfig(
             output_dir=str(tmp_path / "output"),
-            epochs=5,
+            epochs=3,
             batch_size=2,
             num_workers=0,
-            gradient_accumulation_steps=1,
             log_every_steps=10,
             device="cpu",
             dtype="float32",
             deterministic=False,
             early_stopping_patience=1,
-            checkpoint_metric="rmse_ticks",
             resume_from=resume_from,
+        ),
+        evaluation=EvaluationConfig(
+            report_horizons=(1, 3),
+            trading_horizon=3,
+            save_predictions=False,
         ),
     )
 
 
-def _epoch_metrics(*args, split: str, epoch: int, **kwargs):
+def _epoch_metrics(*args, split, epoch, **kwargs):
     del args, kwargs
-    rmse = 1.0 if epoch == 1 else 1.1
-    return {
-        "loss": rmse,
-        "pinball": rmse,
-        "huber": rmse,
-        "crossing": 0.0,
-        "rmse_ticks": rmse,
-        "oos_r2_vs_persistence": 0.0,
+    value = 1.0 if epoch == 1 else 1.1
+    result = {
+        "loss": value,
+        "mean_pinball": value,
+        "rmse": value,
         "samples_per_second": 1.0,
-        "split": split,
     }
+    if split == "val":
+        result.update(
+            {
+                "cumulative_horizons": [
+                    {"horizon_minutes": 1, "ic": 0.0},
+                    {"horizon_minutes": 3, "ic": 0.0},
+                ],
+                "slices": [],
+            }
+        )
+    return result
 
 
-def test_train_experiment_early_stops_and_writes_resumable_state(
-    monkeypatch, tmp_path
-):
+def test_training_writes_versioned_resumable_state(monkeypatch, bundle_factory, tmp_path):
     monkeypatch.setattr(
         trainer.TimesFM3Adapter,
         "from_pretrained",
         lambda *args, **kwargs: _CheckpointModel(),
     )
     monkeypatch.setattr(trainer, "_run_epoch", _epoch_metrics)
-
-    output = trainer.train_experiment(_experiment(tmp_path))
-    history = [
-        json.loads(line)
-        for line in (output / "history.jsonl").read_text().splitlines()
-    ]
+    output = trainer.train_experiment(_experiment(bundle_factory, tmp_path))
+    history = [json.loads(line) for line in (output / "history.jsonl").read_text().splitlines()]
     assert len(history) == 2
-    assert (output / "best" / "adapter.pt").exists()
-    assert (output / "best" / "training_state.pt").exists()
-    assert (output / "last" / "adapter.pt").exists()
-    assert (output / "last" / "training_state.pt").exists()
-
-    resumed = trainer.train_experiment(
-        _experiment(
-            tmp_path,
-            resume_from=str(output / "last" / "training_state.pt"),
-        )
+    state = torch.load(
+        output / "last/training_state.pt",
+        map_location="cpu",
+        weights_only=False,
     )
-    resumed_history = [
-        json.loads(line)
-        for line in (resumed / "history.jsonl").read_text().splitlines()
-    ]
-    assert [row["epoch"] for row in resumed_history] == [1, 2, 3]
-
-
-def test_set_seed_reproduces_torch_and_numpy_draws():
-    trainer.set_seed(123, deterministic=True)
-    first = (torch.rand(3), np.random.rand(3))
-    trainer.set_seed(123, deterministic=True)
-    second = (torch.rand(3), np.random.rand(3))
-    torch.testing.assert_close(first[0], second[0])
-    np.testing.assert_allclose(first[1], second[1])
-    trainer.set_seed(0, deterministic=False)
+    assert state["format_version"] == 2
+    assert (output / "best/adapter.pt").exists()

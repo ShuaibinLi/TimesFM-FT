@@ -1,4 +1,4 @@
-"""Typed experiment configuration."""
+"""Typed configuration for the 1-minute intraday forecasting task."""
 
 from __future__ import annotations
 
@@ -13,30 +13,39 @@ class DataConfig:
     train_path: str
     val_path: str
     test_path: str | None = None
-    product: str | None = None
-    target_mode: Literal["level", "delta_ticks"] = "level"
-    context_length: int = 256
+    dataset_id: str | None = None
+    product: str = "ZN"
+    target_name: str = "return_1m"
+    target_unit: str = "ticks"
+    target_price_source: str = "weighted_mid"
+    target_return_type: Literal["simple", "log"] = "simple"
+    target_timestamp_semantics: Literal["bar_start", "bar_end"] = "bar_end"
+    target_availability_lag_minutes: int = 0
+    frequency_minutes: int = 1
+    context_min: int = 64
+    context_max: int = 192
     horizon_length: int = 64
-    stride: int = 64
+    stride: int = 1
+    session_minutes: int = 390
     max_variates: int = 32
-    sampling_interval_seconds: float = 0.5
+    past_only_features: tuple[str, ...] = ()
+    past_future_features: tuple[str, ...] = ()
     train_dates_path: str | None = None
     val_dates_path: str | None = None
     test_dates_path: str | None = None
-    require_metadata: bool = False
-    eval_only: bool = False
+    require_metadata: bool = True
 
 
 @dataclasses.dataclass(frozen=True)
 class ModelConfig:
     checkpoint: str = "google/timesfm-3.0-pytorch"
     disable_linear_detrending: bool = False
-    disable_iterative_cpm_revin: bool = False
+    disable_iterative_cpm_revin: bool = True
 
 
 @dataclasses.dataclass(frozen=True)
 class AdapterConfig:
-    type: Literal["head", "lora", "partial", "full"] = "lora"
+    type: Literal["head", "lora", "partial", "full"] = "head"
     last_n_layers: int = 4
     rank: int = 8
     alpha: float = 16.0
@@ -48,12 +57,7 @@ class AdapterConfig:
 
 @dataclasses.dataclass(frozen=True)
 class ObjectiveConfig:
-    tick_size: float
-    pinball_weight: float = 1.0
-    include_median_in_pinball: bool = False
-    median_huber_weight: float = 0.5
-    crossing_weight: float = 0.05
-    huber_delta_ticks: float = 1.0
+    name: Literal["pinball"] = "pinball"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -77,39 +81,67 @@ class SchedulerConfig:
 
 @dataclasses.dataclass(frozen=True)
 class TrainerConfig:
-    output_dir: str = "outputs/weighted-mid"
-    epochs: int = 10
-    batch_size: int = 16
+    output_dir: str = "outputs/intraday-1min"
+    epochs: int = 5
+    batch_size: int = 32
     max_grad_norm: float = 1.0
-    num_workers: int = 0
+    num_workers: int = 4
     gradient_accumulation_steps: int = 1
-    log_every_steps: int = 1
+    log_every_steps: int = 10
     seed: int = 42
     device: str = "auto"
-    dtype: Literal["float32", "bfloat16"] = "float32"
-    deterministic: bool = False
-    early_stopping_patience: int | None = None
-    checkpoint_metric: Literal["rmse_ticks", "loss", "mean_pinball_ticks"] = (
-        "rmse_ticks"
-    )
+    dtype: Literal["float32", "bfloat16"] = "bfloat16"
+    deterministic: bool = True
+    early_stopping_patience: int | None = 2
+    checkpoint_metric: Literal["mean_pinball", "rmse"] = "mean_pinball"
     resume_from: str | None = None
+
+
+@dataclasses.dataclass(frozen=True)
+class EvaluationConfig:
+    report_horizons: tuple[int, ...] = (1, 5, 10, 20, 30, 60)
+    trading_horizon: int = 60
+    cost_per_turnover: float = 0.0
+    save_predictions: bool = True
 
 
 @dataclasses.dataclass(frozen=True)
 class ExperimentConfig:
     data: DataConfig
-    objective: ObjectiveConfig
     model: ModelConfig = dataclasses.field(default_factory=ModelConfig)
     adapter: AdapterConfig = dataclasses.field(default_factory=AdapterConfig)
+    objective: ObjectiveConfig = dataclasses.field(default_factory=ObjectiveConfig)
     optimizer: OptimizerConfig = dataclasses.field(default_factory=OptimizerConfig)
     scheduler: SchedulerConfig = dataclasses.field(default_factory=SchedulerConfig)
     trainer: TrainerConfig = dataclasses.field(default_factory=TrainerConfig)
+    evaluation: EvaluationConfig = dataclasses.field(default_factory=EvaluationConfig)
 
     @classmethod
     def from_json(cls, path: str | Path) -> ExperimentConfig:
         config_path = Path(path).resolve()
-        with config_path.open(encoding="utf-8") as handle:
-            raw: dict[str, Any] = json.load(handle)
+
+        def load_raw(current: Path, seen: frozenset[Path]) -> dict[str, Any]:
+            if current in seen:
+                raise ValueError(f"cyclic config inheritance at {current}")
+            with current.open(encoding="utf-8") as handle:
+                value = json.load(handle)
+            if not isinstance(value, dict):
+                raise ValueError(f"config must be a JSON object: {current}")
+            parent = value.pop("extends", None)
+            if parent is None:
+                return value
+            parent_path = Path(parent)
+            if not parent_path.is_absolute():
+                parent_path = (current.parent / parent_path).resolve()
+            base = load_raw(parent_path, seen | {current})
+            for section, override in value.items():
+                if isinstance(override, dict) and isinstance(base.get(section), dict):
+                    base[section] = {**base[section], **override}
+                else:
+                    base[section] = override
+            return base
+
+        raw = load_raw(config_path, frozenset())
         base_dir = config_path.parent
 
         def resolve_path(value: str | None) -> str | None:
@@ -118,6 +150,8 @@ class ExperimentConfig:
             return str((base_dir / value).resolve())
 
         data = dict(raw["data"])
+        for key in ("past_only_features", "past_future_features"):
+            data[key] = tuple(data.get(key, ()))
         for key in (
             "train_path",
             "val_path",
@@ -128,67 +162,89 @@ class ExperimentConfig:
         ):
             if key in data:
                 data[key] = resolve_path(data[key])
+
         trainer = dict(raw.get("trainer", {}))
         if "output_dir" in trainer:
             trainer["output_dir"] = resolve_path(trainer["output_dir"])
         if "resume_from" in trainer:
             trainer["resume_from"] = resolve_path(trainer["resume_from"])
+
         model = dict(raw.get("model", {}))
         checkpoint = model.get("checkpoint")
         if isinstance(checkpoint, str) and checkpoint.startswith("."):
             model["checkpoint"] = resolve_path(checkpoint)
-        return cls(
+
+        evaluation = dict(raw.get("evaluation", {}))
+        evaluation["report_horizons"] = tuple(
+            evaluation.get("report_horizons", EvaluationConfig().report_horizons)
+        )
+        config = cls(
             data=DataConfig(**data),
-            objective=ObjectiveConfig(**raw["objective"]),
             model=ModelConfig(**model),
             adapter=AdapterConfig(**raw.get("adapter", {})),
+            objective=ObjectiveConfig(**raw.get("objective", {})),
             optimizer=OptimizerConfig(**raw.get("optimizer", {})),
             scheduler=SchedulerConfig(**raw.get("scheduler", {})),
             trainer=TrainerConfig(**trainer),
+            evaluation=EvaluationConfig(**evaluation),
         )
+        config.validate()
+        return config
 
     def to_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self)
 
     def validate(self) -> None:
-        if self.data.context_length <= 0:
-            raise ValueError("context_length must be positive")
-        if self.data.horizon_length <= 0:
-            raise ValueError("horizon_length must be positive")
-        if self.data.stride <= 0:
-            raise ValueError("stride must be positive")
-        if self.data.sampling_interval_seconds <= 0:
-            raise ValueError("sampling_interval_seconds must be positive")
-        if self.data.max_variates < 1 or self.data.max_variates > 32:
+        data = self.data
+        if data.frequency_minutes != 1:
+            raise ValueError("v1 requires frequency_minutes=1")
+        if data.target_availability_lag_minutes != 0:
+            raise ValueError("v1 requires target_availability_lag_minutes=0")
+        if not 0 < data.context_min <= data.context_max:
+            raise ValueError("context lengths must satisfy 0 < context_min <= context_max")
+        if data.horizon_length <= 0 or data.stride <= 0:
+            raise ValueError("horizon_length and stride must be positive")
+        if data.session_minutes < data.context_min + data.horizon_length:
+            raise ValueError("session is too short for context_min plus horizon")
+        if not 1 <= data.max_variates <= 32:
             raise ValueError("max_variates must be in [1, 32]")
-        if not self.data.eval_only and self.data.train_path == self.data.val_path:
+        if len(set(data.past_only_features)) != len(data.past_only_features):
+            raise ValueError("past_only_features contains duplicates")
+        if len(set(data.past_future_features)) != len(data.past_future_features):
+            raise ValueError("past_future_features contains duplicates")
+        overlap = set(data.past_only_features) & set(data.past_future_features)
+        if overlap:
+            raise ValueError(f"features cannot be both past-only and past-future: {overlap}")
+        num_variates = 1 + len(data.past_only_features) + len(data.past_future_features)
+        if num_variates > data.max_variates:
+            raise ValueError(
+                f"configured {num_variates} variates exceeds max_variates={data.max_variates}"
+            )
+        if data.train_path == data.val_path:
             raise ValueError("train_path and val_path must differ")
-        if self.data.test_path is not None and self.data.test_path in {
-            self.data.train_path,
-            self.data.val_path,
+        if data.test_path is not None and data.test_path in {
+            data.train_path,
+            data.val_path,
         }:
             raise ValueError("test_path must differ from train_path and val_path")
-        if self.data.require_metadata:
-            required_metadata = {
-                "product": self.data.product,
-                "train_dates_path": self.data.train_dates_path,
-                "val_dates_path": self.data.val_dates_path,
+        if data.require_metadata:
+            required = {
+                "dataset_id": data.dataset_id,
+                "train_dates_path": data.train_dates_path,
+                "val_dates_path": data.val_dates_path,
             }
-            missing = [key for key, value in required_metadata.items() if value is None]
+            missing = [key for key, value in required.items() if value is None]
             if missing:
-                raise ValueError(
-                    f"metadata validation requires fields: {', '.join(missing)}"
-                )
-            if self.data.test_path is not None and self.data.test_dates_path is None:
-                raise ValueError(
-                    "metadata validation requires test_dates_path with test_path"
-                )
-        if self.objective.tick_size <= 0:
-            raise ValueError("tick_size must be positive")
+                raise ValueError(f"metadata validation requires fields: {', '.join(missing)}")
+            if data.test_path is not None and data.test_dates_path is None:
+                raise ValueError("test_dates_path is required with test_path")
+
+        if self.objective.name != "pinball":
+            raise ValueError("v1 supports only the pinball objective")
         if self.adapter.last_n_layers <= 0:
             raise ValueError("last_n_layers must be positive")
         if self.adapter.type == "lora" and self.adapter.rank <= 0:
-            raise ValueError("adapter rank must be positive")
+            raise ValueError("LoRA rank must be positive")
         if self.adapter.type == "lora" and not any(
             (
                 self.adapter.lora_sequence_attention,
@@ -196,55 +252,51 @@ class ExperimentConfig:
                 self.adapter.lora_feedforward,
             )
         ):
-            raise ValueError("lora mode requires at least one injection target")
-        if self.adapter.alpha <= 0:
-            raise ValueError("adapter alpha must be positive")
-        if not 0 <= self.adapter.dropout < 1:
-            raise ValueError("adapter dropout must be in [0, 1)")
-        objective_weights = (
-            self.objective.pinball_weight,
-            self.objective.median_huber_weight,
-            self.objective.crossing_weight,
-        )
-        if any(weight < 0 for weight in objective_weights):
-            raise ValueError("objective weights must be non-negative")
-        if not any(weight > 0 for weight in objective_weights):
-            raise ValueError("at least one objective weight must be positive")
+            raise ValueError("LoRA requires at least one injection target")
+        if self.adapter.alpha <= 0 or not 0 <= self.adapter.dropout < 1:
+            raise ValueError("invalid LoRA alpha/dropout")
+
         learning_rates = (
             self.optimizer.adapter_learning_rate,
             self.optimizer.head_learning_rate,
             self.optimizer.pretrained_learning_rate,
         )
-        if any(learning_rate <= 0 for learning_rate in learning_rates):
+        if any(value <= 0 for value in learning_rates):
             raise ValueError("all learning rates must be positive")
-        if self.optimizer.name != "adamw":
-            raise ValueError("only optimizer.name='adamw' is currently supported")
-        if not 0 <= self.optimizer.weight_decay:
-            raise ValueError("weight_decay must be non-negative")
+        if self.optimizer.weight_decay < 0 or self.optimizer.eps <= 0:
+            raise ValueError("invalid optimizer weight_decay/eps")
         if not 0 < self.optimizer.beta1 < 1 or not 0 < self.optimizer.beta2 < 1:
-            raise ValueError("optimizer beta1 and beta2 must be in (0, 1)")
-        if self.optimizer.eps <= 0:
-            raise ValueError("optimizer eps must be positive")
-        if self.scheduler.name != "cosine":
-            raise ValueError("only scheduler.name='cosine' is currently supported")
+            raise ValueError("optimizer betas must be in (0, 1)")
         if not 0 <= self.scheduler.warmup_ratio < 1:
             raise ValueError("warmup_ratio must be in [0, 1)")
         if not 0 <= self.scheduler.min_lr_ratio <= 1:
             raise ValueError("min_lr_ratio must be in [0, 1]")
-        if self.trainer.batch_size <= 0:
-            raise ValueError("batch_size must be positive")
-        if self.trainer.epochs <= 0:
-            raise ValueError("epochs must be positive")
-        if self.trainer.gradient_accumulation_steps <= 0:
-            raise ValueError("gradient_accumulation_steps must be positive")
-        if self.trainer.log_every_steps <= 0:
-            raise ValueError("log_every_steps must be positive")
-        if self.trainer.max_grad_norm <= 0:
-            raise ValueError("max_grad_norm must be positive")
-        if self.trainer.num_workers < 0:
-            raise ValueError("num_workers must be non-negative")
+
+        trainer = self.trainer
         if (
-            self.trainer.early_stopping_patience is not None
-            and self.trainer.early_stopping_patience <= 0
+            min(
+                trainer.epochs,
+                trainer.batch_size,
+                trainer.gradient_accumulation_steps,
+                trainer.log_every_steps,
+            )
+            <= 0
         ):
+            raise ValueError("trainer counts must be positive")
+        if trainer.max_grad_norm <= 0 or trainer.num_workers < 0:
+            raise ValueError("invalid max_grad_norm/num_workers")
+        if trainer.early_stopping_patience is not None and trainer.early_stopping_patience <= 0:
             raise ValueError("early_stopping_patience must be positive or null")
+
+        evaluation = self.evaluation
+        if (
+            not evaluation.report_horizons
+            or tuple(sorted(set(evaluation.report_horizons))) != evaluation.report_horizons
+        ):
+            raise ValueError("report_horizons must be non-empty, unique, and sorted")
+        if evaluation.report_horizons[-1] > data.horizon_length:
+            raise ValueError("report_horizons cannot exceed horizon_length")
+        if not 1 <= evaluation.trading_horizon <= data.horizon_length:
+            raise ValueError("trading_horizon must be within the forecast horizon")
+        if evaluation.cost_per_turnover < 0:
+            raise ValueError("cost_per_turnover must be non-negative")

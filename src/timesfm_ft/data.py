@@ -1,450 +1,520 @@
-"""Window-level data contract for single-target forecasting."""
+"""Audited intraday-minute dataset with dynamic context windows."""
 
 from __future__ import annotations
 
 import hashlib
 import json
 import math
+from collections import defaultdict
+from collections.abc import Iterator, Sequence
 from pathlib import Path
-from typing import Any, NotRequired, TypedDict
+from typing import Any, TypedDict
 
 import numpy as np
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Sampler
+
+BUNDLE_FORMAT = "timesfm-ft-intraday-minute-bundle"
+BUNDLE_VERSION = 1
+
+
+class WindowSample(TypedDict):
+    context_values: torch.Tensor
+    context_mask: torch.Tensor
+    past_future_values: torch.Tensor
+    past_future_mask: torch.Tensor
+    future_values: torch.Tensor
+    future_mask: torch.Tensor
+    context_length: int
+    timestamp: int
+    date: int
+    minute_index: int
+    last_return: float
+    context_volatility: float
 
 
 class WindowBatch(TypedDict):
     context_values: torch.Tensor
     context_mask: torch.Tensor
+    past_future_values: torch.Tensor
+    past_future_mask: torch.Tensor
     future_values: torch.Tensor
     future_mask: torch.Tensor
-    cutoff_wmp: NotRequired[torch.Tensor]
+    context_lengths: torch.Tensor
+    timestamps: torch.Tensor
+    dates: torch.Tensor
+    minute_indices: torch.Tensor
+    last_returns: torch.Tensor
+    context_volatility: torch.Tensor
 
 
-class NpzWindowDataset(Dataset[WindowBatch]):
-    """Loads NPZ smoke data or a memory-mapped production window bundle.
+def _date_file_sha256(path: str | Path) -> str:
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
-    A bundle is a directory containing ``context_values.npy``,
-    ``future_values.npy``, ``timestamps.npy``, ``dates.npy``, and
-    ``manifest.json``. Optional masks use matching ``*_mask.npy`` names.
+
+def read_dates(path: str | Path) -> tuple[int, ...]:
+    values = tuple(
+        int(line.strip())
+        for line in Path(path).read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.startswith("#")
+    )
+    if not values:
+        raise ValueError(f"no dates in {path}")
+    if len(values) != len(set(values)) or values != tuple(sorted(values)):
+        raise ValueError(f"dates must be unique and sorted: {path}")
+    return values
+
+
+class IntradayWindowDataset(Dataset[WindowSample]):
+    """Builds non-overnight dynamic-context samples from a session bundle.
+
+    The bundle stores one row per trade date and one column per minute. Windows
+    are sliced lazily, so overlapping samples do not duplicate the underlying
+    feature data on disk.
     """
+
+    _ARRAYS = (
+        "target_values",
+        "target_mask",
+        "past_only_values",
+        "past_only_mask",
+        "past_future_values",
+        "past_future_mask",
+        "timestamps",
+        "dates",
+        "session_lengths",
+    )
 
     def __init__(
         self,
         path: str | Path,
         *,
-        context_length: int,
+        context_min: int,
+        context_max: int,
         horizon_length: int,
+        stride: int,
+        past_only_features: Sequence[str] = (),
+        past_future_features: Sequence[str] = (),
         max_variates: int = 32,
-        sampling_interval_seconds: float | None = None,
-        expected_stride: int | None = None,
-        expected_product: str | None = None,
         expected_split: str | None = None,
-        expected_target_mode: str | None = None,
-        expected_tick_size: float | None = None,
-        expected_dates: set[int] | None = None,
+        expected_dataset_id: str | None = None,
+        expected_product: str | None = None,
+        expected_target_name: str | None = None,
+        expected_target_unit: str | None = None,
+        expected_target_price_source: str | None = None,
+        expected_target_return_type: str | None = None,
+        expected_target_timestamp_semantics: str | None = None,
+        expected_target_availability_lag_minutes: int | None = None,
+        expected_frequency_minutes: int | None = None,
+        expected_session_minutes: int | None = None,
         expected_dates_path: str | Path | None = None,
-        require_metadata: bool = False,
+        require_metadata: bool = True,
     ) -> None:
         self.path = Path(path)
-        if not self.path.exists():
-            raise FileNotFoundError(self.path)
+        if not self.path.is_dir():
+            raise FileNotFoundError(f"intraday bundle directory not found: {self.path}")
+        if not 0 < context_min <= context_max:
+            raise ValueError("context lengths must satisfy 0 < min <= max")
+        if min(horizon_length, stride) <= 0:
+            raise ValueError("horizon_length and stride must be positive")
 
-        self.metadata = self._load_metadata(self.path)
-        loaded = self._load_arrays(self.path)
-        if self.path.is_dir():
-            self._validate_bundle_integrity(loaded, self.metadata)
-        contexts = np.asarray(loaded["context_values"], dtype=np.float32)
-        futures = np.asarray(loaded["future_values"], dtype=np.float32)
-        if contexts.ndim == 2:
-            contexts = contexts[:, None, :]
-        if contexts.ndim != 3:
+        metadata_path = self.path / "manifest.json"
+        if not metadata_path.exists():
+            if require_metadata:
+                raise ValueError(f"bundle requires manifest.json: {self.path}")
+            self.metadata: dict[str, Any] = {}
+        else:
+            with metadata_path.open(encoding="utf-8") as handle:
+                self.metadata = json.load(handle)
+            if not isinstance(self.metadata, dict):
+                raise ValueError("manifest must be a JSON object")
+
+        arrays: dict[str, np.ndarray] = {}
+        for name in self._ARRAYS:
+            array_path = self.path / f"{name}.npy"
+            if not array_path.exists():
+                raise ValueError(f"bundle is missing {name}.npy")
+            arrays[name] = np.load(array_path, mmap_mode="c", allow_pickle=False)
+        self._validate_integrity(arrays)
+
+        self.target_values = arrays["target_values"]
+        self.target_mask = arrays["target_mask"]
+        self._all_past_only_values = arrays["past_only_values"]
+        self._all_past_only_mask = arrays["past_only_mask"]
+        self._all_past_future_values = arrays["past_future_values"]
+        self._all_past_future_mask = arrays["past_future_mask"]
+        self.timestamps = arrays["timestamps"]
+        self.dates = arrays["dates"]
+        self.session_lengths = arrays["session_lengths"]
+
+        available_past_only = tuple(self.metadata.get("past_only_features", ()))
+        available_past_future = tuple(self.metadata.get("past_future_features", ()))
+        self.past_only_features = tuple(past_only_features)
+        self.past_future_features = tuple(past_future_features)
+        self._past_only_indices = self._feature_indices(
+            self.past_only_features, available_past_only, "past-only"
+        )
+        self._past_future_indices = self._feature_indices(
+            self.past_future_features, available_past_future, "past-future"
+        )
+        self.num_variates = 1 + len(self.past_only_features) + len(self.past_future_features)
+        if self.num_variates > max_variates or self.num_variates > 32:
             raise ValueError(
-                f"context_values must be rank 2 or 3, got {contexts.shape}"
-            )
-        if futures.ndim != 2:
-            raise ValueError(f"future_values must be rank 2, got {futures.shape}")
-        if contexts.shape[0] != futures.shape[0]:
-            raise ValueError("context_values and future_values sample counts differ")
-        if contexts.shape[-1] != context_length:
-            raise ValueError(
-                f"expected context_length={context_length}, got {contexts.shape[-1]}"
-            )
-        if futures.shape[-1] != horizon_length:
-            raise ValueError(
-                f"expected horizon_length={horizon_length}, got {futures.shape[-1]}"
-            )
-        if contexts.shape[1] > max_variates:
-            raise ValueError(
-                f"received {contexts.shape[1]} variates; limit is {max_variates}"
+                f"selected {self.num_variates} variates exceeds limit {min(max_variates, 32)}"
             )
 
-        context_mask = self._prepare_mask(
-            loaded.get("context_mask"), contexts, "context_mask"
-        )
-        future_mask = self._prepare_mask(
-            loaded.get("future_mask"), futures, "future_mask"
-        )
-        if context_mask is not None and context_mask.ndim == 2:
-            context_mask = context_mask[:, None, :]
-        if context_mask is not None and context_mask.shape != contexts.shape:
-            raise ValueError(
-                f"context_mask shape {context_mask.shape} != {contexts.shape}"
-            )
-        if future_mask is not None and future_mask.shape != futures.shape:
-            raise ValueError(
-                f"future_mask shape {future_mask.shape} != {futures.shape}"
-            )
-
-        context_nonfinite = ~np.isfinite(contexts)
-        future_nonfinite = ~np.isfinite(futures)
-        if context_nonfinite.any():
-            context_mask = (
-                context_nonfinite
-                if context_mask is None
-                else context_mask | context_nonfinite
-            )
-            contexts = np.nan_to_num(contexts, copy=True)
-        if future_nonfinite.any():
-            future_mask = (
-                future_nonfinite
-                if future_mask is None
-                else future_mask | future_nonfinite
-            )
-            futures = np.nan_to_num(futures, copy=True)
-        if context_mask is not None:
-            if np.any(np.all(context_mask[:, 0, :], axis=-1)):
-                raise ValueError("weighted-mid context cannot be fully masked")
-            if np.any(context_mask[:, 0, -1]):
-                raise ValueError(
-                    "the weighted-mid value at every forecast cutoff must be valid"
-                )
-        if future_mask is not None and np.any(np.all(future_mask, axis=-1)):
-            raise ValueError("every sample needs at least one valid future target")
-
-        self.context_values = contexts
-        self.future_values = futures
-        self.context_mask = context_mask
-        self.future_mask = future_mask
-        self.timestamps = self._optional_vector(
-            loaded.get("timestamps"), len(contexts), np.int64, "timestamps"
-        )
-        self.dates = self._optional_vector(
-            loaded.get("dates"), len(contexts), np.int32, "dates"
-        )
-        self.cutoff_wmp = self._optional_vector(
-            loaded.get("cutoff_wmp"), len(contexts), np.float32, "cutoff_wmp"
-        )
+        self.context_min = context_min
+        self.context_max = context_max
+        self.horizon_length = horizon_length
+        self.stride = stride
         self._validate_metadata(
-            context_length=context_length,
-            horizon_length=horizon_length,
-            sampling_interval_seconds=sampling_interval_seconds,
-            expected_stride=expected_stride,
-            expected_product=expected_product,
             expected_split=expected_split,
-            expected_target_mode=expected_target_mode,
-            expected_tick_size=expected_tick_size,
-            expected_dates=expected_dates,
+            expected_dataset_id=expected_dataset_id,
+            expected_product=expected_product,
+            expected_target_name=expected_target_name,
+            expected_target_unit=expected_target_unit,
+            expected_target_price_source=expected_target_price_source,
+            expected_target_return_type=expected_target_return_type,
+            expected_target_timestamp_semantics=expected_target_timestamp_semantics,
+            expected_target_availability_lag_minutes=(expected_target_availability_lag_minutes),
+            expected_frequency_minutes=expected_frequency_minutes,
+            expected_session_minutes=expected_session_minutes,
             expected_dates_path=expected_dates_path,
             require_metadata=require_metadata,
         )
 
-    @staticmethod
-    def _load_arrays(path: Path) -> dict[str, np.ndarray]:
-        names = (
-            "context_values",
-            "future_values",
-            "context_mask",
-            "future_mask",
-            "timestamps",
-            "dates",
-            "cutoff_wmp",
-        )
-        if path.is_dir():
-            arrays: dict[str, np.ndarray] = {}
-            for name in names:
-                array_path = path / f"{name}.npy"
-                if array_path.exists():
-                    arrays[name] = np.load(
-                        array_path,
-                        mmap_mode="c",
-                        allow_pickle=False,
-                    )
-            if "context_values" not in arrays or "future_values" not in arrays:
-                raise ValueError(
-                    f"{path} must contain context_values.npy and future_values.npy"
-                )
-            return arrays
-
-        with np.load(path, allow_pickle=False) as archive:
-            if "context_values" not in archive or "future_values" not in archive:
-                raise ValueError(
-                    f"{path} must contain context_values and future_values"
-                )
-            return {name: archive[name] for name in names if name in archive}
+        day_indices: list[int] = []
+        anchor_indices: list[int] = []
+        context_lengths: list[int] = []
+        for day_index, session_length_value in enumerate(self.session_lengths):
+            session_length = int(session_length_value)
+            for anchor in range(
+                self.context_min - 1,
+                session_length - self.horizon_length,
+                self.stride,
+            ):
+                day_indices.append(day_index)
+                anchor_indices.append(anchor)
+                context_lengths.append(min(self.context_max, anchor + 1))
+        if not day_indices:
+            raise ValueError("bundle produces no valid intraday windows")
+        self._day_indices = np.asarray(day_indices, dtype=np.int32)
+        self._anchor_indices = np.asarray(anchor_indices, dtype=np.int16)
+        self.context_lengths = np.asarray(context_lengths, dtype=np.int16)
 
     @staticmethod
-    def _prepare_mask(
-        mask: np.ndarray | None,
-        values: np.ndarray,
-        name: str,
-    ) -> np.ndarray | None:
-        if mask is None:
-            return None
-        result = np.asarray(mask, dtype=np.bool_)
-        if result.shape != values.shape and not (
-            result.ndim == 2
-            and values.ndim == 3
-            and values.shape[1] == 1
-            and result.shape == (values.shape[0], values.shape[2])
-        ):
-            raise ValueError(f"{name} shape {result.shape} != {values.shape}")
-        return result
+    def _feature_indices(
+        selected: tuple[str, ...],
+        available: tuple[str, ...],
+        kind: str,
+    ) -> np.ndarray:
+        if len(selected) != len(set(selected)):
+            raise ValueError(f"selected {kind} features contain duplicates")
+        lookup = {name: index for index, name in enumerate(available)}
+        missing = [name for name in selected if name not in lookup]
+        if missing:
+            raise ValueError(f"unknown {kind} features: {missing}")
+        return np.asarray([lookup[name] for name in selected], dtype=np.int64)
 
-    @staticmethod
-    def _optional_vector(
-        value: np.ndarray | None,
-        samples: int,
-        dtype: np.dtype[Any],
-        name: str,
-    ) -> np.ndarray | None:
-        if value is None:
-            return None
-        result = np.asarray(value, dtype=dtype)
-        if result.shape != (samples,):
-            raise ValueError(f"{name} must have shape ({samples},), got {result.shape}")
-        return result
-
-    @staticmethod
-    def _load_metadata(path: Path) -> dict[str, Any] | None:
-        metadata_path = path / "manifest.json" if path.is_dir() else path.with_suffix(".json")
-        if not metadata_path.exists():
-            return None
-        with metadata_path.open(encoding="utf-8") as handle:
-            metadata = json.load(handle)
-        if not isinstance(metadata, dict):
-            raise ValueError(f"dataset metadata must be an object: {metadata_path}")
-        return metadata
-
-    def _validate_bundle_integrity(
-        self,
-        arrays: dict[str, np.ndarray],
-        metadata: dict[str, Any] | None,
-    ) -> None:
-        if metadata is None:
-            raise ValueError(f"memory-mapped bundle requires manifest.json: {self.path}")
-        if metadata.get("format_version") != 1:
-            raise ValueError(
-                f"unsupported bundle format_version={metadata.get('format_version')!r}"
-            )
-        if metadata.get("format") != "timesfm-ft-npy-bundle":
-            raise ValueError(f"unsupported bundle format={metadata.get('format')!r}")
-        target_mode = metadata.get("target_mode", "level")
-        if target_mode not in {"level", "delta_ticks"}:
-            raise ValueError(f"unsupported target_mode={target_mode!r}")
-        if target_mode == "delta_ticks":
-            tick_size = float(metadata.get("tick_size", math.nan))
-            if not math.isfinite(tick_size) or tick_size <= 0:
-                raise ValueError("delta bundle requires a positive finite tick_size")
-
-        required_dtypes = {
-            "context_values": np.dtype(np.float32),
-            "future_values": np.dtype(np.float32),
+    def _validate_integrity(self, arrays: dict[str, np.ndarray]) -> None:
+        if self.metadata.get("format") != BUNDLE_FORMAT:
+            raise ValueError(f"unsupported bundle format={self.metadata.get('format')!r}")
+        if self.metadata.get("format_version") != BUNDLE_VERSION:
+            raise ValueError(f"unsupported format_version={self.metadata.get('format_version')!r}")
+        expected_dtypes = {
+            "target_values": np.dtype(np.float32),
+            "target_mask": np.dtype(np.bool_),
+            "past_only_values": np.dtype(np.float32),
+            "past_only_mask": np.dtype(np.bool_),
+            "past_future_values": np.dtype(np.float32),
+            "past_future_mask": np.dtype(np.bool_),
             "timestamps": np.dtype(np.int64),
             "dates": np.dtype(np.int32),
+            "session_lengths": np.dtype(np.int16),
         }
-        if target_mode == "delta_ticks":
-            required_dtypes["cutoff_wmp"] = np.dtype(np.float32)
-        for name, expected_dtype in required_dtypes.items():
-            if name not in arrays:
-                raise ValueError(f"bundle is missing required array {name}.npy")
-            if arrays[name].dtype != expected_dtype:
-                raise ValueError(
-                    f"{name} dtype={arrays[name].dtype}, expected {expected_dtype}"
-                )
-        for name in ("context_mask", "future_mask"):
-            if name in arrays and arrays[name].dtype != np.dtype(np.bool_):
-                raise ValueError(f"{name} dtype must be bool")
-        if target_mode == "delta_ticks" and not np.isfinite(
-            arrays["cutoff_wmp"]
-        ).all():
-            raise ValueError("cutoff_wmp contains non-finite values")
+        for name, dtype in expected_dtypes.items():
+            if arrays[name].dtype != dtype:
+                raise ValueError(f"{name} dtype={arrays[name].dtype}, expected {dtype}")
 
-        samples = int(metadata.get("samples", -1))
-        if samples < 0:
-            raise ValueError("manifest samples must be non-negative")
-        for name, array in arrays.items():
-            if array.shape[0] != samples:
-                raise ValueError(
-                    f"{name} sample count={array.shape[0]}, manifest={samples}"
-                )
-
-        schema = metadata.get("schema")
+        target_shape = arrays["target_values"].shape
+        if len(target_shape) != 2:
+            raise ValueError("target_values must have shape (days, session_minutes)")
+        days, width = target_shape
+        expected_shapes = {
+            "target_mask": target_shape,
+            "past_only_values": (
+                days,
+                len(self.metadata.get("past_only_features", ())),
+                width,
+            ),
+            "past_only_mask": (
+                days,
+                len(self.metadata.get("past_only_features", ())),
+                width,
+            ),
+            "past_future_values": (
+                days,
+                len(self.metadata.get("past_future_features", ())),
+                width,
+            ),
+            "past_future_mask": (
+                days,
+                len(self.metadata.get("past_future_features", ())),
+                width,
+            ),
+            "timestamps": target_shape,
+            "dates": (days,),
+            "session_lengths": (days,),
+        }
+        for name, expected_shape in expected_shapes.items():
+            if arrays[name].shape != expected_shape:
+                raise ValueError(f"{name} shape={arrays[name].shape}, expected {expected_shape}")
+        schema = self.metadata.get("schema")
         if not isinstance(schema, dict):
             raise ValueError("manifest schema must be an object")
-        for name, expected_dtype in required_dtypes.items():
-            expected_schema = [str(expected_dtype), *arrays[name].shape]
-            if schema.get(name) != expected_schema:
+        for name, array in arrays.items():
+            expected = [str(array.dtype), *array.shape]
+            if schema.get(name) != expected:
                 raise ValueError(
-                    f"manifest schema for {name}={schema.get(name)!r}, "
-                    f"expected {expected_schema!r}"
+                    f"manifest schema for {name}={schema.get(name)!r}, expected {expected}"
                 )
-
-        dates = arrays["dates"]
-        date_values, counts = np.unique(dates, return_counts=True)
-        date_counts = {
-            str(int(day)): int(count)
-            for day, count in zip(date_values, counts, strict=True)
-        }
-        manifest_counts = metadata.get("samples_by_day")
-        if manifest_counts != date_counts:
-            raise ValueError("manifest samples_by_day does not match dates.npy")
-        unique_dates = sorted(date_counts)
-        if metadata.get("date_count") != len(unique_dates):
-            raise ValueError("manifest date_count does not match dates.npy")
-        if not unique_dates:
-            raise ValueError("bundle contains no dates")
-        if metadata.get("first_date") != unique_dates[0]:
-            raise ValueError("manifest first_date does not match dates.npy")
-        if metadata.get("last_date") != unique_dates[-1]:
-            raise ValueError("manifest last_date does not match dates.npy")
-
-        session = metadata.get("session")
-        expected_session = {
-            "timezone": "America/New_York",
-            "start": "09:30:00",
-            "end": "16:15:00",
-            "early_closes_allowed": True,
-        }
-        if session != expected_session:
-            raise ValueError(
-                f"manifest session={session!r}, expected {expected_session!r}"
-            )
+        lengths = arrays["session_lengths"].astype(np.int64)
+        if np.any(lengths <= 0) or np.any(lengths > width):
+            raise ValueError("session_lengths must be within the stored session width")
+        if not np.all(arrays["dates"][1:] > arrays["dates"][:-1]):
+            raise ValueError("dates must be strictly increasing")
+        for day, length_value in enumerate(lengths):
+            length = int(length_value)
+            if arrays["target_mask"][day, :length].any():
+                raise ValueError("target return must be available for every real minute")
+            if not np.isfinite(arrays["target_values"][day, :length]).all():
+                raise ValueError("target_values contains non-finite real minutes")
+            timestamps = arrays["timestamps"][day, :length]
+            if length > 1 and not np.all(np.diff(timestamps) == 60_000_000_000):
+                raise ValueError("timestamps must form an exact 1-minute grid per day")
+            if np.any(timestamps <= 0):
+                raise ValueError("real-minute timestamps must be positive")
 
     def _validate_metadata(
         self,
         *,
-        context_length: int,
-        horizon_length: int,
-        sampling_interval_seconds: float | None,
-        expected_stride: int | None,
-        expected_product: str | None,
         expected_split: str | None,
-        expected_target_mode: str | None,
-        expected_tick_size: float | None,
-        expected_dates: set[int] | None,
+        expected_dataset_id: str | None,
+        expected_product: str | None,
+        expected_target_name: str | None,
+        expected_target_unit: str | None,
+        expected_target_price_source: str | None,
+        expected_target_return_type: str | None,
+        expected_target_timestamp_semantics: str | None,
+        expected_target_availability_lag_minutes: int | None,
+        expected_frequency_minutes: int | None,
+        expected_session_minutes: int | None,
         expected_dates_path: str | Path | None,
         require_metadata: bool,
     ) -> None:
-        if require_metadata and self.metadata is None:
-            raise ValueError(f"dataset metadata is required for {self.path}")
-        if require_metadata and (self.timestamps is None or self.dates is None):
-            raise ValueError(f"timestamps and dates are required for {self.path}")
-        validate_claims = require_metadata or any(
-            value is not None
-            for value in (
-                sampling_interval_seconds,
-                expected_stride,
-                expected_product,
-                expected_split,
-                expected_target_mode,
-                expected_tick_size,
-                expected_dates,
-                expected_dates_path,
-            )
-        )
-        if self.metadata is not None and validate_claims:
-            expected = {
-                "context_length": context_length,
-                "horizon_length": horizon_length,
-                "stride": expected_stride,
-                "product": expected_product,
-                "split": expected_split,
-                "target_mode": expected_target_mode,
-            }
-            for key, value in expected.items():
-                if value is not None and self.metadata.get(key) != value:
-                    raise ValueError(
-                        f"{self.path} metadata {key}={self.metadata.get(key)!r}, "
-                        f"expected {value!r}"
-                    )
-            if sampling_interval_seconds is not None and not math.isclose(
-                float(self.metadata.get("sampling_interval_seconds", math.nan)),
-                sampling_interval_seconds,
-                rel_tol=0.0,
-                abs_tol=1e-12,
-            ):
-                raise ValueError(
-                    f"{self.path} sampling interval does not match config"
-                )
-            if expected_tick_size is not None and not math.isclose(
-                float(self.metadata.get("tick_size", math.nan)),
-                expected_tick_size,
-                rel_tol=0.0,
-                abs_tol=1e-12,
-            ):
-                raise ValueError(f"{self.path} tick size does not match config")
-            if expected_dates_path is not None:
-                date_hash = hashlib.sha256(
-                    Path(expected_dates_path).read_bytes()
-                ).hexdigest()
-                if self.metadata.get("date_file_sha256") != date_hash:
-                    raise ValueError(
-                        f"{self.path} date-list provenance hash mismatch"
-                    )
-
-        if expected_dates is not None:
-            if self.dates is None:
-                raise ValueError(f"dates are required to validate split {self.path}")
-            actual_dates = set(int(value) for value in np.unique(self.dates))
+        if not require_metadata:
+            return
+        expected = {
+            "split": expected_split,
+            "dataset_id": expected_dataset_id,
+            "product": expected_product,
+            "target_name": expected_target_name,
+            "frequency_minutes": expected_frequency_minutes,
+            "session_minutes": expected_session_minutes,
+        }
+        mismatches = {
+            key: (self.metadata.get(key), value)
+            for key, value in expected.items()
+            if value is not None and self.metadata.get(key) != value
+        }
+        if mismatches:
+            raise ValueError(f"bundle metadata mismatch: {mismatches}")
+        target = self.metadata.get("target")
+        expected_target = {
+            "unit": expected_target_unit,
+            "price_source": expected_target_price_source,
+            "return_type": expected_target_return_type,
+            "timestamp_semantics": expected_target_timestamp_semantics,
+            "availability_lag_minutes": expected_target_availability_lag_minutes,
+        }
+        target_mismatches = {
+            key: (target.get(key) if isinstance(target, dict) else None, value)
+            for key, value in expected_target.items()
+            if value is not None and (not isinstance(target, dict) or target.get(key) != value)
+        }
+        if target_mismatches:
+            raise ValueError(f"bundle target-definition mismatch: {target_mismatches}")
+        if expected_dates_path is not None:
+            expected_dates = read_dates(expected_dates_path)
+            actual_dates = tuple(int(value) for value in self.dates)
             if actual_dates != expected_dates:
-                missing = sorted(expected_dates - actual_dates)
-                extra = sorted(actual_dates - expected_dates)
-                raise ValueError(
-                    f"{self.path} split dates mismatch; missing={missing[:5]} "
-                    f"extra={extra[:5]}"
-                )
-        if expected_stride is not None and sampling_interval_seconds is None:
-            raise ValueError(
-                "sampling_interval_seconds is required with expected_stride"
-            )
-        if self.timestamps is not None and self.dates is not None and expected_stride:
-            expected_step_ns = int(
-                round((sampling_interval_seconds or 0.0) * 1_000_000_000)
-            ) * expected_stride
-            for day in np.unique(self.dates):
-                values = self.timestamps[self.dates == day]
-                if len(values) > 1 and not np.all(np.diff(values) == expected_step_ns):
-                    raise ValueError(
-                        f"{self.path} cutoff cadence mismatch on date {int(day)}"
-                    )
-
-    @property
-    def num_variates(self) -> int:
-        return int(self.context_values.shape[1])
+                raise ValueError("bundle dates do not match configured date list")
+            expected_hash = _date_file_sha256(expected_dates_path)
+            if self.metadata.get("date_file_sha256") != expected_hash:
+                raise ValueError("bundle date-file hash does not match configured list")
 
     def __len__(self) -> int:
-        return int(self.context_values.shape[0])
+        return len(self._day_indices)
 
-    def __getitem__(self, index: int) -> WindowBatch:
-        context = torch.from_numpy(np.asarray(self.context_values[index]))
-        future = torch.from_numpy(np.asarray(self.future_values[index]))
-        context_mask = (
-            torch.zeros_like(context, dtype=torch.bool)
-            if self.context_mask is None
-            else torch.from_numpy(np.asarray(self.context_mask[index]))
-        )
-        future_mask = (
-            torch.zeros_like(future, dtype=torch.bool)
-            if self.future_mask is None
-            else torch.from_numpy(np.asarray(self.future_mask[index]))
-        )
-        result: WindowBatch = {
-            "context_values": context,
-            "context_mask": context_mask,
-            "future_values": future,
-            "future_mask": future_mask,
+    def padded_context_length(self, index: int, patch_length: int) -> int:
+        return math.ceil(int(self.context_lengths[index]) / patch_length) * patch_length
+
+    def __getitem__(self, index: int) -> WindowSample:
+        day = int(self._day_indices[index])
+        anchor = int(self._anchor_indices[index])
+        context_length = int(self.context_lengths[index])
+        context_start = anchor - context_length + 1
+        future_start = anchor + 1
+        future_stop = future_start + self.horizon_length
+
+        target_context = self.target_values[day, context_start:future_start][None, :]
+        target_context_mask = self.target_mask[day, context_start:future_start][None, :]
+        past_values = self._all_past_only_values[
+            day, self._past_only_indices, context_start:future_start
+        ]
+        past_mask = self._all_past_only_mask[
+            day, self._past_only_indices, context_start:future_start
+        ]
+        context_values = np.concatenate((target_context, past_values), axis=0)
+        context_mask = np.concatenate((target_context_mask, past_mask), axis=0)
+
+        known_values = self._all_past_future_values[
+            day, self._past_future_indices, context_start:future_stop
+        ]
+        known_mask = self._all_past_future_mask[
+            day, self._past_future_indices, context_start:future_stop
+        ]
+        future_values = self.target_values[day, future_start:future_stop]
+        future_mask = self.target_mask[day, future_start:future_stop]
+        valid_context = target_context[~target_context_mask]
+        volatility = float(np.std(valid_context, dtype=np.float64))
+        return {
+            "context_values": torch.from_numpy(np.array(context_values, copy=True)),
+            "context_mask": torch.from_numpy(np.array(context_mask, copy=True)),
+            "past_future_values": torch.from_numpy(np.array(known_values, copy=True)),
+            "past_future_mask": torch.from_numpy(np.array(known_mask, copy=True)),
+            "future_values": torch.from_numpy(np.array(future_values, copy=True)),
+            "future_mask": torch.from_numpy(np.array(future_mask, copy=True)),
+            "context_length": context_length,
+            "timestamp": int(self.timestamps[day, anchor]),
+            "date": int(self.dates[day]),
+            "minute_index": anchor,
+            "last_return": float(target_context[0, -1]),
+            "context_volatility": volatility,
         }
-        if self.cutoff_wmp is not None:
-            result["cutoff_wmp"] = torch.as_tensor(self.cutoff_wmp[index])
-        return result
+
+
+class ContextBucketBatchSampler(Sampler[list[int]]):
+    """Groups samples by patch-rounded context length before batching."""
+
+    def __init__(
+        self,
+        dataset: IntradayWindowDataset,
+        *,
+        batch_size: int,
+        patch_length: int,
+        shuffle: bool,
+        generator: torch.Generator | None = None,
+        drop_last: bool = False,
+    ) -> None:
+        if batch_size <= 0 or patch_length <= 0:
+            raise ValueError("batch_size and patch_length must be positive")
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.patch_length = patch_length
+        self.shuffle = shuffle
+        self.generator = generator
+        self.drop_last = drop_last
+        buckets: dict[int, list[int]] = defaultdict(list)
+        for index in range(len(dataset)):
+            buckets[dataset.padded_context_length(index, patch_length)].append(index)
+        self._buckets = dict(sorted(buckets.items()))
+
+    def __iter__(self) -> Iterator[list[int]]:
+        batches: list[list[int]] = []
+        for indices in self._buckets.values():
+            ordered = list(indices)
+            if self.shuffle:
+                permutation = torch.randperm(len(ordered), generator=self.generator).tolist()
+                ordered = [ordered[index] for index in permutation]
+            stop = (
+                len(ordered) - (len(ordered) % self.batch_size) if self.drop_last else len(ordered)
+            )
+            for start in range(0, stop, self.batch_size):
+                batch = ordered[start : start + self.batch_size]
+                if len(batch) == self.batch_size or not self.drop_last:
+                    batches.append(batch)
+        if self.shuffle and batches:
+            permutation = torch.randperm(len(batches), generator=self.generator).tolist()
+            batches = [batches[index] for index in permutation]
+        yield from batches
+
+    def __len__(self) -> int:
+        total = 0
+        for indices in self._buckets.values():
+            if self.drop_last:
+                total += len(indices) // self.batch_size
+            else:
+                total += math.ceil(len(indices) / self.batch_size)
+        return total
+
+
+def collate_intraday_windows(
+    samples: list[WindowSample],
+    *,
+    patch_length: int = 32,
+) -> WindowBatch:
+    """Left-pads a context bucket only to its next patch boundary."""
+
+    if not samples:
+        raise ValueError("cannot collate an empty sample list")
+    horizon = int(samples[0]["future_values"].shape[-1])
+    context_variates = int(samples[0]["context_values"].shape[0])
+    future_variates = int(samples[0]["past_future_values"].shape[0])
+    padded_context = max(
+        math.ceil(sample["context_length"] / patch_length) * patch_length for sample in samples
+    )
+    batch_size = len(samples)
+    context_values = torch.zeros(batch_size, context_variates, padded_context, dtype=torch.float32)
+    context_mask = torch.ones_like(context_values, dtype=torch.bool)
+    known_values = torch.zeros(
+        batch_size,
+        future_variates,
+        padded_context + horizon,
+        dtype=torch.float32,
+    )
+    known_mask = torch.ones_like(known_values, dtype=torch.bool)
+
+    for index, sample in enumerate(samples):
+        length = sample["context_length"]
+        left = padded_context - length
+        context_values[index, :, left:] = sample["context_values"]
+        context_mask[index, :, left:] = sample["context_mask"]
+        known_values[index, :, left:padded_context] = sample["past_future_values"][:, :length]
+        known_values[index, :, padded_context:] = sample["past_future_values"][:, length:]
+        known_mask[index, :, left:padded_context] = sample["past_future_mask"][:, :length]
+        known_mask[index, :, padded_context:] = sample["past_future_mask"][:, length:]
+
+    return {
+        "context_values": context_values,
+        "context_mask": context_mask,
+        "past_future_values": known_values,
+        "past_future_mask": known_mask,
+        "future_values": torch.stack([sample["future_values"] for sample in samples]),
+        "future_mask": torch.stack([sample["future_mask"] for sample in samples]),
+        "context_lengths": torch.tensor(
+            [sample["context_length"] for sample in samples], dtype=torch.int16
+        ),
+        "timestamps": torch.tensor([sample["timestamp"] for sample in samples], dtype=torch.int64),
+        "dates": torch.tensor([sample["date"] for sample in samples], dtype=torch.int32),
+        "minute_indices": torch.tensor(
+            [sample["minute_index"] for sample in samples], dtype=torch.int16
+        ),
+        "last_returns": torch.tensor(
+            [sample["last_return"] for sample in samples], dtype=torch.float32
+        ),
+        "context_volatility": torch.tensor(
+            [sample["context_volatility"] for sample in samples],
+            dtype=torch.float32,
+        ),
+    }

@@ -1,80 +1,76 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
-from timesfm_ft.config import ExperimentConfig
+import pytest
+
+from timesfm_ft.config import DataConfig, ExperimentConfig
 
 
-def test_all_repository_configs_use_structured_sections():
-    root = Path(__file__).resolve().parents[1]
-    for path in sorted((root / "configs").glob("*.json")):
-        config = ExperimentConfig.from_json(path)
-        config.validate()
-        assert config.optimizer.adapter_learning_rate > 0
-        assert config.optimizer.head_learning_rate > 0
-        assert config.optimizer.pretrained_learning_rate > 0
-        assert config.trainer.log_every_steps > 0
-
-
-def test_product_configs_use_hardened_training_contract():
-    root = Path(__file__).resolve().parents[1]
-    for product, tick_size in (("zn", 0.015625), ("es", 0.25)):
-        config = ExperimentConfig.from_json(
-            root / "configs" / f"{product}_single_input.json"
-        )
-        assert config.data.product == product.upper()
-        assert config.data.target_mode == "delta_ticks"
-        assert config.data.require_metadata
-        assert config.data.test_path is not None
-        assert config.data.context_length == 256
+def test_e0_e5_matrix_matches_training_plan():
+    root = Path(__file__).resolve().parents[1] / "configs/experiments"
+    configs = {path.stem: ExperimentConfig.from_json(path) for path in root.glob("e*.json")}
+    assert set(configs) == {
+        "e0_return_only",
+        "e1_past_only",
+        "e2_past_future",
+        "e3_context_128",
+        "e4_context_256",
+        "e5_context_min_96",
+    }
+    for config in configs.values():
+        assert config.data.frequency_minutes == 1
         assert config.data.horizon_length == 64
-        assert config.data.stride == 64
-        assert config.data.sampling_interval_seconds == 0.5
-        assert config.objective.tick_size == tick_size
+        assert config.data.stride == 1
+        assert config.objective.name == "pinball"
+        assert config.trainer.checkpoint_metric == "mean_pinball"
         assert config.model.disable_iterative_cpm_revin
-        assert config.trainer.batch_size == 32
-        assert config.trainer.gradient_accumulation_steps == 2
-        assert config.trainer.deterministic
-        assert config.trainer.dtype == "bfloat16"
-        assert config.trainer.early_stopping_patience == 2
-        assert config.trainer.checkpoint_metric == "rmse_ticks"
+    assert configs["e0_return_only"].data.past_only_features == ()
+    assert len(configs["e1_past_only"].data.past_only_features) == 18
+    assert len(configs["e2_past_future"].data.past_future_features) == 3
+    assert configs["e3_context_128"].data.context_max == 128
+    assert configs["e4_context_256"].data.context_max == 256
+    assert configs["e5_context_min_96"].data.context_min == 96
 
 
-def test_relative_paths_resolve_from_config_directory(monkeypatch, tmp_path):
+def test_relative_paths_resolve_from_leaf_config(tmp_path, monkeypatch):
     root = Path(__file__).resolve().parents[1]
     monkeypatch.chdir(tmp_path)
-    config = ExperimentConfig.from_json(root / "configs" / "zn_single_input.json")
-    assert Path(config.data.train_path) == (
-        root
-        / "data"
-        / "zn-wmp-500ms"
-        / "splits"
-        / "train_delta_c256_h64"
-    )
-    assert Path(config.data.train_dates_path) == (
-        root / "configs" / "splits" / "dates-train.txt"
-    )
+    config = ExperimentConfig.from_json(root / "configs/experiments/e2_past_future.json")
+    assert Path(config.data.train_path) == root / "data/intraday-1min/train"
+    assert Path(config.data.train_dates_path) == root / "configs/splits/dates-train.txt"
 
 
-def test_pinball_suite_configs_are_objective_matched():
-    root = Path(__file__).resolve().parents[1] / "configs"
-    expected_modes = {
-        "zn_pinball_head.json": "head",
-        "zn_pinball_lora.json": "lora",
-        "zn_pinball_full.json": "full",
+def test_variate_budget_and_role_overlap_fail_closed():
+    common = {
+        "train_path": "train",
+        "val_path": "val",
+        "require_metadata": False,
+        "session_minutes": 390,
     }
-    configs = {
-        name: ExperimentConfig.from_json(root / name)
-        for name in expected_modes
-    }
-    for name, config in configs.items():
-        assert config.adapter.type == expected_modes[name]
-        assert config.data.target_mode == "delta_ticks"
-        assert config.objective.include_median_in_pinball
-        assert config.objective.pinball_weight == 1.0
-        assert config.objective.median_huber_weight == 0.0
-        assert config.objective.crossing_weight == 0.0
-        assert config.trainer.checkpoint_metric == "mean_pinball_ticks"
-    assert len({config.data for config in configs.values()}) == 1
-    assert len({config.optimizer for config in configs.values()}) == 1
-    assert len({config.scheduler for config in configs.values()}) == 1
+    with pytest.raises(ValueError, match="both past-only and past-future|cannot be both"):
+        ExperimentConfig(
+            data=DataConfig(
+                **common,
+                past_only_features=("x",),
+                past_future_features=("x",),
+            )
+        ).validate()
+    with pytest.raises(ValueError, match="exceeds max_variates"):
+        ExperimentConfig(
+            data=DataConfig(
+                **common,
+                max_variates=2,
+                past_only_features=("x", "y"),
+            )
+        ).validate()
+
+
+def test_config_inheritance_rejects_cycles(tmp_path):
+    first = tmp_path / "first.json"
+    second = tmp_path / "second.json"
+    first.write_text(json.dumps({"extends": "second.json"}))
+    second.write_text(json.dumps({"extends": "first.json"}))
+    with pytest.raises(ValueError, match="cyclic"):
+        ExperimentConfig.from_json(first)

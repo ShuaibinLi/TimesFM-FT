@@ -1,0 +1,82 @@
+{
+  "data": {
+    "train_path": "../../data/intraday-1min/train",
+    "val_path": "../../data/intraday-1min/val",
+    "test_path": "../../data/intraday-1min/test",
+    "dataset_id": "intraday_1min_return_features_v1",
+    "product": "PRIMARY",
+    "target_name": "return_1m",
+    "target_unit": "frozen_source_unit",
+    "target_price_source": "frozen_source_price",
+    "target_return_type": "simple",
+    "target_timestamp_semantics": "bar_end",
+    "target_availability_lag_minutes": 0,
+    "frequency_minutes": 1,
+    "context_min": 64,
+    "context_max": 192,
+    "horizon_length": 64,
+    "stride": 1,
+    "session_minutes": 390,
+    "max_variates": 32,
+    "past_only_features": [],
+    "past_future_features": [],
+    "train_dates_path": "../splits/dates-train.txt",
+    "val_dates_path": "../splits/dates-val.txt",
+    "test_dates_path": "../splits/dates-test.txt",
+    "require_metadata": true
+  },
+  "model": {
+    "checkpoint": "google/timesfm-3.0-pytorch",
+    "disable_linear_detrending": false,
+    "disable_iterative_cpm_revin": true
+  },
+  "adapter": {
+    "type": "head",
+    "last_n_layers": 4,
+    "rank": 8,
+    "alpha": 16.0,
+    "dropout": 0.05,
+    "lora_sequence_attention": true,
+    "lora_variate_attention": true,
+    "lora_feedforward": true
+  },
+  "objective": {
+    "name": "pinball"
+  },
+  "optimizer": {
+    "name": "adamw",
+    "adapter_learning_rate": 0.0001,
+    "head_learning_rate": 0.0003,
+    "pretrained_learning_rate": 0.00001,
+    "weight_decay": 0.01,
+    "beta1": 0.9,
+    "beta2": 0.999,
+    "eps": 1e-8
+  },
+  "scheduler": {
+    "name": "cosine",
+    "warmup_ratio": 0.05,
+    "min_lr_ratio": 0.1
+  },
+  "trainer": {
+    "output_dir": "../../outputs/intraday-1min",
+    "epochs": 5,
+    "batch_size": 32,
+    "max_grad_norm": 1.0,
+    "num_workers": 4,
+    "gradient_accumulation_steps": 2,
+    "log_every_steps": 10,
+    "seed": 42,
+    "device": "auto",
+    "dtype": "bfloat16",
+    "deterministic": true,
+    "early_stopping_patience": 2,
+    "checkpoint_metric": "mean_pinball"
+  },
+  "evaluation": {
+    "report_horizons": [1, 5, 10, 20, 30, 60],
+    "trading_horizon": 60,
+    "cost_per_turnover": 0.0,
+    "save_predictions": true
+  }
+}
