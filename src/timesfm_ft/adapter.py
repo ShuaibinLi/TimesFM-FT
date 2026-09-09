@@ -125,7 +125,7 @@ def configure_tuning(
                         alpha=lora_alpha,
                         dropout=lora_dropout,
                     )
-    elif mode != "head":
+    elif mode not in {"head", "full"}:
         raise ValueError(f"unsupported tuning mode: {mode}")
 
     names = [name for name, parameter in backbone.named_parameters() if parameter.requires_grad]

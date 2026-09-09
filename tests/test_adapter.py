@@ -213,6 +213,13 @@ def test_lora_can_skip_variate_attention_for_univariate_inputs():
     assert not any("var_attn" in name and "lora_" in name for name in names)
 
 
+def test_full_mode_marks_every_parameter_trainable():
+    backbone = make_tiny_model()
+    names = configure_tuning(backbone, mode="full", last_n_layers=1)
+    assert names
+    assert all(parameter.requires_grad for parameter in backbone.parameters())
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA BF16 smoke")
 def test_bfloat16_compute_keeps_fp32_master_weights(monkeypatch):
     monkeypatch.setattr(
