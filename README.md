@@ -1,16 +1,16 @@
 # TimesFM-FT
 
-Research fine-tuning toolkit for TimesFM 3, focused on weighted-mid forecasting
-with one data point every 500 ms.
+Research fine-tuning toolkit for TimesFM 3, focused on forecasting the signed
+weighted-mid change over each 500 ms step.
 
 The first supported task uses a historical context window to predict the next
-64 points (32 seconds) of one weighted-mid target from 256 context points
-(128 seconds). Two aligned input contracts
+64 consecutive delta-tick values (32 seconds) from 256 historical delta-tick
+values (128 seconds). Two aligned input contracts
 are supported:
 
-1. single input: weighted-mid history only;
-2. multi input: weighted-mid plus past-only covariates, with weighted-mid still
-   the only supervised output.
+1. single input: historical 500 ms WMP deltas only;
+2. multi input: WMP deltas plus past-only covariates, with future WMP delta
+   still the only supervised output.
 
 > TimesFM 3 weights are currently distributed under Google's non-commercial,
 > non-production license. This repository is for research use. Review the
@@ -97,6 +97,7 @@ Required arrays:
 ```text
 context_values: float32[S, V, C] or float32[S, C]
 future_values:  float32[S, H]
+cutoff_wmp:     float32[S]
 ```
 
 Production bundles also require:
@@ -113,11 +114,11 @@ Conventions:
 
 - every adjacent data point is exactly 500 ms apart;
 - `C=256` (128 seconds) and `H=64` (32 seconds) in the production configs;
-- variate zero must always be weighted-mid;
+- variate zero must always be `delta_ticks = ΔWMP / tick_size`;
 - `V=1` for the single-input route and `1<V<=32` for the multi-input route;
 - variates `1..V-1` are past-only covariates;
-- the weighted-mid value at the forecast cutoff must be present;
-- `future_values` always contains weighted-mid only;
+- `cutoff_wmp` records the absolute price anchor for auditing and plot reconstruction;
+- `future_values` contains the next 64 one-step delta-tick targets;
 - train, validation, and test bundles must come from disjoint chronological
   split lists, never random row splits.
 
@@ -134,7 +135,9 @@ lists under `configs/splits/`:
 - test: 120 days, 2025-08-01 through 2026-01-30.
 
 All observations are exactly 500 ms apart. Production windows use 256 context
-points (128 seconds), 64 future points (32 seconds), and a 64-point stride.
+delta points (128 seconds), 64 future delta points (32 seconds), and a 64-point
+stride. Each sample therefore consumes 321 source WMP levels and stores the
+level at the context/future boundary as `cutoff_wmp`.
 Data preparation requires GCS application-default credentials. Build both
 products' day-safe, memory-mapped bundles without crossing session boundaries:
 
@@ -158,6 +161,16 @@ Resume an interrupted run with:
 scripts/run_train_nohup.sh configs/zn_single_input.json \
   outputs/zn-single-input-c256-h64/last
 ```
+
+Run the matched all-quantile Pinball comparison (head → LoRA → full,
+sequentially on one GPU) with:
+
+```bash
+scripts/run_pinball_suite_nohup.sh
+```
+
+The suite gates each mode on a shuffled real-checkpoint batch before training
+and writes orchestration status to `outputs/zn-pinball-suite/suite.log`.
 
 ## Contract smoke test
 
@@ -316,14 +329,13 @@ own base LR.
 
 ## Objective
 
-The backbone produces absolute-price quantiles. Before loss computation,
-predictions and labels are converted to displacement from the cutoff price:
+The backbone consumes and predicts direct 500 ms delta-tick values:
 
 ```text
-ticks[h] = (weighted_mid[t+h] - weighted_mid[t]) / tick_size
+delta_ticks[t] = (WMP[t] - WMP[t-1]) / tick_size
 ```
 
-The default objective is:
+The balanced default objective is:
 
 ```text
 pinball(P10, P20, P30, P40, P60, P70, P80, P90)
@@ -334,7 +346,11 @@ pinball(P10, P20, P30, P40, P60, P70, P80, P90)
 P50 is deliberately excluded from Pinball so it is not supervised twice.
 Best-checkpoint selection uses mask-aware validation P50 RMSE in ticks, while
 composite loss, persistence RMSE, OOS R², direction, coverage, and crossing are
-all logged. TimesFM emits and returns the requested 64 points (32 seconds).
+all logged. The matched Pinball suite instead includes all nine quantiles,
+sets Huber/crossing weights to zero, and selects by validation mean Pinball.
+Zero-delta is the WMP-persistence baseline; repeating the last observed delta
+is reported as a second baseline. Absolute WMP plots are reconstructed from
+`cutoff_wmp + cumsum(delta_ticks * tick_size)`.
 
 ## Outputs
 

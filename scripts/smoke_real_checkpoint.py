@@ -72,6 +72,8 @@ def main() -> None:
         expected_stride=config.data.stride,
         expected_product=config.data.product,
         expected_split="train",
+        expected_target_mode=config.data.target_mode,
+        expected_tick_size=config.objective.tick_size,
         expected_dates=expected_dates,
         expected_dates_path=config.data.train_dates_path,
         require_metadata=True,
@@ -107,7 +109,9 @@ def main() -> None:
     loss_fn = ForecastLoss(
         model.quantiles,
         tick_size=config.objective.tick_size,
+        target_mode=config.data.target_mode,
         pinball_weight=config.objective.pinball_weight,
+        include_median_in_pinball=config.objective.include_median_in_pinball,
         median_huber_weight=config.objective.median_huber_weight,
         crossing_weight=config.objective.crossing_weight,
         huber_delta_ticks=config.objective.huber_delta_ticks,

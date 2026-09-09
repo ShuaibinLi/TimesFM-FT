@@ -23,6 +23,7 @@ def test_product_configs_use_hardened_training_contract():
             root / "configs" / f"{product}_single_input.json"
         )
         assert config.data.product == product.upper()
+        assert config.data.target_mode == "delta_ticks"
         assert config.data.require_metadata
         assert config.data.test_path is not None
         assert config.data.context_length == 256
@@ -44,8 +45,36 @@ def test_relative_paths_resolve_from_config_directory(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     config = ExperimentConfig.from_json(root / "configs" / "zn_single_input.json")
     assert Path(config.data.train_path) == (
-        root / "data" / "zn-wmp-500ms" / "splits" / "train_c256_h64"
+        root
+        / "data"
+        / "zn-wmp-500ms"
+        / "splits"
+        / "train_delta_c256_h64"
     )
     assert Path(config.data.train_dates_path) == (
         root / "configs" / "splits" / "dates-train.txt"
     )
+
+
+def test_pinball_suite_configs_are_objective_matched():
+    root = Path(__file__).resolve().parents[1] / "configs"
+    expected_modes = {
+        "zn_pinball_head.json": "head",
+        "zn_pinball_lora.json": "lora",
+        "zn_pinball_full.json": "full",
+    }
+    configs = {
+        name: ExperimentConfig.from_json(root / name)
+        for name in expected_modes
+    }
+    for name, config in configs.items():
+        assert config.adapter.type == expected_modes[name]
+        assert config.data.target_mode == "delta_ticks"
+        assert config.objective.include_median_in_pinball
+        assert config.objective.pinball_weight == 1.0
+        assert config.objective.median_huber_weight == 0.0
+        assert config.objective.crossing_weight == 0.0
+        assert config.trainer.checkpoint_metric == "mean_pinball_ticks"
+    assert len({config.data for config in configs.values()}) == 1
+    assert len({config.optimizer for config in configs.values()}) == 1
+    assert len({config.scheduler for config in configs.values()}) == 1

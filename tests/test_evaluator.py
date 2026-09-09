@@ -13,6 +13,7 @@ from timesfm_ft.config import (
     TrainerConfig,
 )
 from timesfm_ft.evaluator import EvaluationAccumulator, evaluate_experiment
+from timesfm_ft.metrics import reconstruct_wmp_paths
 
 
 def test_evaluation_accumulator_reports_point_and_baseline_metrics():
@@ -80,6 +81,48 @@ def test_evaluation_accumulator_rejects_nonfinite_predictions():
             current_price=torch.zeros(1),
             target_mask=torch.zeros(1, 1, dtype=torch.bool),
         )
+
+
+def test_delta_metrics_use_zero_and_last_delta_baselines():
+    accumulator = EvaluationAccumulator(
+        horizon=2,
+        quantiles=(0.1, 0.5, 0.9),
+        tick_size=0.015625,
+        sampling_interval_seconds=0.5,
+        target_mode="delta_ticks",
+    )
+    targets = torch.tensor([[0.5, -0.25]])
+    predictions = targets[:, :, None].repeat(1, 1, 3)
+    accumulator.update(
+        predictions,
+        targets,
+        current_price=torch.tensor([0.5]),
+        target_mask=torch.zeros_like(targets, dtype=torch.bool),
+    )
+    summary, rows = accumulator.results()
+    assert summary["rmse_ticks"] == 0.0
+    assert summary["persistence_rmse_ticks"] == pytest.approx(
+        (0.15625) ** 0.5
+    )
+    assert summary["last_delta_rmse_ticks"] == pytest.approx(
+        (0.28125) ** 0.5
+    )
+    assert summary["directional_accuracy"] == 1.0
+    assert rows[0]["oos_r2_vs_persistence"] == 1.0
+
+
+def test_reconstructs_price_paths_from_delta_ticks():
+    context_wmp, future_wmp = reconstruct_wmp_paths(
+        np.array([1.0, -0.5]),
+        np.array([[0.5, 1.0], [-1.0, 0.0]]),
+        cutoff_wmp=100.0,
+        tick_size=0.25,
+    )
+    np.testing.assert_allclose(context_wmp, [100.125, 100.0])
+    np.testing.assert_allclose(
+        future_wmp,
+        [[100.125, 100.25], [99.875, 100.25]],
+    )
 
 
 class _PersistenceModel:

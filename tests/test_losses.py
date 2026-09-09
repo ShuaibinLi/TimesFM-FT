@@ -28,6 +28,45 @@ def test_balanced_objective_excludes_median_from_pinball():
     assert output.median_huber > 0.0
 
 
+def test_pinball_only_objective_includes_median():
+    target = torch.tensor([[100.0]])
+    predictions = torch.tensor([[[100.0, 100.01, 100.0]]])
+    loss = ForecastLoss(
+        [0.1, 0.5, 0.9],
+        tick_size=0.01,
+        include_median_in_pinball=True,
+        median_huber_weight=0.0,
+        crossing_weight=0.0,
+    )
+    output = loss(
+        predictions,
+        target,
+        current_price=torch.tensor([100.0]),
+    )
+    assert loss.pinball_quantile_count == 3
+    assert output.pinball > 0.0
+    torch.testing.assert_close(output.total, output.pinball)
+
+
+def test_delta_tick_mode_compares_direct_increment_values():
+    target = torch.tensor([[0.25, -0.5]])
+    predictions = target[:, :, None].repeat(1, 1, 3)
+    loss = ForecastLoss(
+        [0.1, 0.5, 0.9],
+        tick_size=0.015625,
+        target_mode="delta_ticks",
+        include_median_in_pinball=True,
+        median_huber_weight=0.0,
+        crossing_weight=0.0,
+    )
+    output = loss(
+        predictions,
+        target,
+        current_price=torch.tensor([999.0]),
+    )
+    torch.testing.assert_close(output.total, torch.tensor(0.0))
+
+
 def test_loss_computes_in_float32_and_respects_mask():
     target = torch.tensor([[100.01, 100.02]])
     predictions = target[:, :, None].repeat(1, 1, 3).to(torch.bfloat16)

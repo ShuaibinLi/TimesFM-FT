@@ -130,6 +130,16 @@ def evaluate_experiment(
             else config.data.product
         ),
         expected_split=selected_split,
+        expected_target_mode=(
+            None
+            if data_path is not None and allow_unsafe_data
+            else config.data.target_mode
+        ),
+        expected_tick_size=(
+            None
+            if data_path is not None and allow_unsafe_data
+            else config.objective.tick_size
+        ),
         expected_dates=expected_dates,
         expected_dates_path=expected_dates_path,
         require_metadata=(
@@ -160,6 +170,7 @@ def evaluate_experiment(
         quantiles=model.quantiles,
         tick_size=config.objective.tick_size,
         sampling_interval_seconds=config.data.sampling_interval_seconds,
+        target_mode=config.data.target_mode,
     )
 
     LOGGER.info(

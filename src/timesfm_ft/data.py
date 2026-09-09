@@ -6,7 +6,7 @@ import hashlib
 import json
 import math
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any, NotRequired, TypedDict
 
 import numpy as np
 import torch
@@ -18,6 +18,7 @@ class WindowBatch(TypedDict):
     context_mask: torch.Tensor
     future_values: torch.Tensor
     future_mask: torch.Tensor
+    cutoff_wmp: NotRequired[torch.Tensor]
 
 
 class NpzWindowDataset(Dataset[WindowBatch]):
@@ -39,6 +40,8 @@ class NpzWindowDataset(Dataset[WindowBatch]):
         expected_stride: int | None = None,
         expected_product: str | None = None,
         expected_split: str | None = None,
+        expected_target_mode: str | None = None,
+        expected_tick_size: float | None = None,
         expected_dates: set[int] | None = None,
         expected_dates_path: str | Path | None = None,
         require_metadata: bool = False,
@@ -129,6 +132,9 @@ class NpzWindowDataset(Dataset[WindowBatch]):
         self.dates = self._optional_vector(
             loaded.get("dates"), len(contexts), np.int32, "dates"
         )
+        self.cutoff_wmp = self._optional_vector(
+            loaded.get("cutoff_wmp"), len(contexts), np.float32, "cutoff_wmp"
+        )
         self._validate_metadata(
             context_length=context_length,
             horizon_length=horizon_length,
@@ -136,6 +142,8 @@ class NpzWindowDataset(Dataset[WindowBatch]):
             expected_stride=expected_stride,
             expected_product=expected_product,
             expected_split=expected_split,
+            expected_target_mode=expected_target_mode,
+            expected_tick_size=expected_tick_size,
             expected_dates=expected_dates,
             expected_dates_path=expected_dates_path,
             require_metadata=require_metadata,
@@ -150,6 +158,7 @@ class NpzWindowDataset(Dataset[WindowBatch]):
             "future_mask",
             "timestamps",
             "dates",
+            "cutoff_wmp",
         )
         if path.is_dir():
             arrays: dict[str, np.ndarray] = {}
@@ -230,6 +239,13 @@ class NpzWindowDataset(Dataset[WindowBatch]):
             )
         if metadata.get("format") != "timesfm-ft-npy-bundle":
             raise ValueError(f"unsupported bundle format={metadata.get('format')!r}")
+        target_mode = metadata.get("target_mode", "level")
+        if target_mode not in {"level", "delta_ticks"}:
+            raise ValueError(f"unsupported target_mode={target_mode!r}")
+        if target_mode == "delta_ticks":
+            tick_size = float(metadata.get("tick_size", math.nan))
+            if not math.isfinite(tick_size) or tick_size <= 0:
+                raise ValueError("delta bundle requires a positive finite tick_size")
 
         required_dtypes = {
             "context_values": np.dtype(np.float32),
@@ -237,6 +253,8 @@ class NpzWindowDataset(Dataset[WindowBatch]):
             "timestamps": np.dtype(np.int64),
             "dates": np.dtype(np.int32),
         }
+        if target_mode == "delta_ticks":
+            required_dtypes["cutoff_wmp"] = np.dtype(np.float32)
         for name, expected_dtype in required_dtypes.items():
             if name not in arrays:
                 raise ValueError(f"bundle is missing required array {name}.npy")
@@ -247,6 +265,10 @@ class NpzWindowDataset(Dataset[WindowBatch]):
         for name in ("context_mask", "future_mask"):
             if name in arrays and arrays[name].dtype != np.dtype(np.bool_):
                 raise ValueError(f"{name} dtype must be bool")
+        if target_mode == "delta_ticks" and not np.isfinite(
+            arrays["cutoff_wmp"]
+        ).all():
+            raise ValueError("cutoff_wmp contains non-finite values")
 
         samples = int(metadata.get("samples", -1))
         if samples < 0:
@@ -308,6 +330,8 @@ class NpzWindowDataset(Dataset[WindowBatch]):
         expected_stride: int | None,
         expected_product: str | None,
         expected_split: str | None,
+        expected_target_mode: str | None,
+        expected_tick_size: float | None,
         expected_dates: set[int] | None,
         expected_dates_path: str | Path | None,
         require_metadata: bool,
@@ -323,6 +347,8 @@ class NpzWindowDataset(Dataset[WindowBatch]):
                 expected_stride,
                 expected_product,
                 expected_split,
+                expected_target_mode,
+                expected_tick_size,
                 expected_dates,
                 expected_dates_path,
             )
@@ -334,6 +360,7 @@ class NpzWindowDataset(Dataset[WindowBatch]):
                 "stride": expected_stride,
                 "product": expected_product,
                 "split": expected_split,
+                "target_mode": expected_target_mode,
             }
             for key, value in expected.items():
                 if value is not None and self.metadata.get(key) != value:
@@ -350,6 +377,13 @@ class NpzWindowDataset(Dataset[WindowBatch]):
                 raise ValueError(
                     f"{self.path} sampling interval does not match config"
                 )
+            if expected_tick_size is not None and not math.isclose(
+                float(self.metadata.get("tick_size", math.nan)),
+                expected_tick_size,
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            ):
+                raise ValueError(f"{self.path} tick size does not match config")
             if expected_dates_path is not None:
                 date_hash = hashlib.sha256(
                     Path(expected_dates_path).read_bytes()
@@ -405,9 +439,12 @@ class NpzWindowDataset(Dataset[WindowBatch]):
             if self.future_mask is None
             else torch.from_numpy(np.asarray(self.future_mask[index]))
         )
-        return {
+        result: WindowBatch = {
             "context_values": context,
             "context_mask": context_mask,
             "future_values": future,
             "future_mask": future_mask,
         }
+        if self.cutoff_wmp is not None:
+            result["cutoff_wmp"] = torch.as_tensor(self.cutoff_wmp[index])
+        return result

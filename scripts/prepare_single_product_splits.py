@@ -28,8 +28,9 @@ SPLITS = ("train", "val", "test")
 SESSION_TIMEZONE = ZoneInfo("America/New_York")
 SESSION_OPEN = time(9, 30)
 SESSION_CLOSE = time(16, 15)
-EARLY_CLOSE = time(13, 0)
+EARLY_CLOSES = (time(13, 0), time(13, 15))
 SESSION_BOUNDARY_TOLERANCE_SECONDS = 30
+PRODUCT_TICK_SIZES = {"ZN": 0.015625, "ES": 0.25}
 
 
 def _read_dates(path: Path) -> list[str]:
@@ -108,7 +109,7 @@ def _read_day(
             tables.append(pq.read_table(stream, columns=["timestamp_ns", "wmp"]))
     table = tables[0] if len(tables) == 1 else pa.concat_tables(tables)
     timestamp = table.column("timestamp_ns").to_numpy(zero_copy_only=False)
-    wmp = table.column("wmp").to_numpy(zero_copy_only=False).astype(np.float32)
+    wmp = table.column("wmp").to_numpy(zero_copy_only=False).astype(np.float64)
     return timestamp, wmp
 
 
@@ -155,18 +156,23 @@ def _validate_day(
         SESSION_CLOSE,
         tzinfo=SESSION_TIMEZONE,
     )
-    early_close = datetime.combine(
-        expected_date,
-        EARLY_CLOSE,
-        tzinfo=SESSION_TIMEZONE,
-    )
     near_normal_close = (
         abs((last - normal_close).total_seconds())
         <= SESSION_BOUNDARY_TOLERANCE_SECONDS
     )
-    near_early_close = (
-        abs((last - early_close).total_seconds())
+    near_early_close = any(
+        abs(
+            (
+                last
+                - datetime.combine(
+                    expected_date,
+                    close_time,
+                    tzinfo=SESSION_TIMEZONE,
+                )
+            ).total_seconds()
+        )
         <= SESSION_BOUNDARY_TOLERANCE_SECONDS
+        for close_time in EARLY_CLOSES
     )
     if not (near_normal_close or near_early_close):
         raise ValueError(
@@ -190,15 +196,22 @@ def build_split(
     horizon_length: int,
     stride: int,
     interval_ns: int,
+    target_mode: str = "level",
+    tick_size: float = 1.0,
     overwrite: bool = False,
 ) -> None:
+    if target_mode not in {"level", "delta_ticks"}:
+        raise ValueError(f"unsupported target_mode={target_mode!r}")
+    if tick_size <= 0:
+        raise ValueError("tick_size must be positive")
     fs, source_path = fsspec.core.url_to_fs(source_root.rstrip("/"))
     day_parts: dict[str, list[str]] = {}
     sample_counts: dict[str, int] = {}
     for day in dates:
         parts = _parts_for_day(fs, source_path, product, day)
         rows = _row_count(fs, parts)
-        sample_count = len(range(context_length - 1, rows - horizon_length, stride))
+        first_cutoff = context_length if target_mode == "delta_ticks" else context_length - 1
+        sample_count = len(range(first_cutoff, rows - horizon_length, stride))
         if sample_count <= 0:
             raise ValueError(f"{product} {day} produces no windows from {rows} rows")
         day_parts[day] = parts
@@ -240,6 +253,16 @@ def build_split(
         dtype=np.int32,
         shape=(total_samples,),
     )
+    cutoff_wmp = (
+        np.lib.format.open_memmap(
+            temporary / "cutoff_wmp.npy",
+            mode="w+",
+            dtype=np.float32,
+            shape=(total_samples,),
+        )
+        if target_mode == "delta_ticks"
+        else None
+    )
 
     offset = 0
     for index, day in enumerate(dates, start=1):
@@ -250,10 +273,17 @@ def build_split(
             product=product,
             day=day,
             interval_ns=interval_ns,
-            minimum_rows=context_length + horizon_length,
+            minimum_rows=(
+                context_length
+                + horizon_length
+                + (1 if target_mode == "delta_ticks" else 0)
+            ),
+        )
+        first_cutoff = (
+            context_length if target_mode == "delta_ticks" else context_length - 1
         )
         cutoffs = np.arange(
-            context_length - 1,
+            first_cutoff,
             len(wmp) - horizon_length,
             stride,
             dtype=np.int64,
@@ -262,14 +292,27 @@ def build_split(
         if count != sample_counts[day]:
             raise RuntimeError(f"{product} {day} row count changed during build")
         target = slice(offset, offset + count)
-        context_windows = np.lib.stride_tricks.sliding_window_view(
-            wmp, context_length
-        )
-        future_windows = np.lib.stride_tricks.sliding_window_view(
-            wmp, horizon_length
-        )
-        contexts[target] = context_windows[cutoffs - context_length + 1]
-        futures[target] = future_windows[cutoffs + 1]
+        if target_mode == "delta_ticks":
+            delta_ticks = (np.diff(wmp) / tick_size).astype(np.float32)
+            context_windows = np.lib.stride_tricks.sliding_window_view(
+                delta_ticks, context_length
+            )
+            future_windows = np.lib.stride_tricks.sliding_window_view(
+                delta_ticks, horizon_length
+            )
+            contexts[target] = context_windows[cutoffs - context_length]
+            futures[target] = future_windows[cutoffs]
+            assert cutoff_wmp is not None
+            cutoff_wmp[target] = wmp[cutoffs]
+        else:
+            context_windows = np.lib.stride_tricks.sliding_window_view(
+                wmp, context_length
+            )
+            future_windows = np.lib.stride_tricks.sliding_window_view(
+                wmp, horizon_length
+            )
+            contexts[target] = context_windows[cutoffs - context_length + 1]
+            futures[target] = future_windows[cutoffs + 1]
         timestamps[target] = timestamp[cutoffs]
         sample_dates[target] = int(day)
         offset += count
@@ -282,9 +325,12 @@ def build_split(
                 len(dates),
             )
 
-    for array in (contexts, futures, timestamps, sample_dates):
+    arrays = [contexts, futures, timestamps, sample_dates]
+    if cutoff_wmp is not None:
+        arrays.append(cutoff_wmp)
+    for array in arrays:
         array.flush()
-    del contexts, futures, timestamps, sample_dates
+    del contexts, futures, timestamps, sample_dates, cutoff_wmp
     manifest = {
         "format_version": 1,
         "format": "timesfm-ft-npy-bundle",
@@ -296,6 +342,11 @@ def build_split(
             "future_values": ["float32", total_samples, horizon_length],
             "timestamps": ["int64", total_samples],
             "dates": ["int32", total_samples],
+            **(
+                {"cutoff_wmp": ["float32", total_samples]}
+                if target_mode == "delta_ticks"
+                else {}
+            ),
         },
         "date_count": len(dates),
         "first_date": dates[0],
@@ -303,6 +354,13 @@ def build_split(
         "date_file": str(dates_path),
         "date_file_sha256": _date_file_sha256(dates_path),
         "sampling_interval_seconds": interval_ns / 1_000_000_000,
+        "target_mode": target_mode,
+        "tick_size": tick_size,
+        "source_levels_per_sample": (
+            context_length + horizon_length + 1
+            if target_mode == "delta_ticks"
+            else context_length + horizon_length
+        ),
         "context_length": context_length,
         "context_seconds": context_length * interval_ns / 1_000_000_000,
         "horizon_length": horizon_length,
@@ -350,7 +408,19 @@ def main() -> None:
     parser.add_argument("--horizon-length", type=int, default=64)
     parser.add_argument("--stride", type=int, default=64)
     parser.add_argument("--sampling-interval-seconds", type=float, default=0.5)
-    parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument(
+        "--target-mode",
+        choices=("level", "delta_ticks"),
+        default="delta_ticks",
+    )
+    parser.add_argument(
+        "--tick-size",
+        type=float,
+        help="Override the product tick size.",
+    )
+    output_mode = parser.add_mutually_exclusive_group()
+    output_mode.add_argument("--overwrite", action="store_true")
+    output_mode.add_argument("--skip-existing", action="store_true")
     args = parser.parse_args()
 
     if min(args.context_length, args.horizon_length, args.stride) <= 0:
@@ -366,21 +436,31 @@ def main() -> None:
     products = ("ZN", "ES") if args.product == "all" else (args.product,)
     interval_ns = round(args.sampling_interval_seconds * 1_000_000_000)
     for product in products:
+        tick_size = args.tick_size or PRODUCT_TICK_SIZES[product]
         product_dir = args.output_root / f"{product.lower()}-wmp-500ms" / "splits"
         for split in SPLITS:
             dates, dates_path = split_dates[split]
+            destination = product_dir / (
+                f"{split}_delta_c{args.context_length}_h{args.horizon_length}"
+                if args.target_mode == "delta_ticks"
+                else f"{split}_c{args.context_length}_h{args.horizon_length}"
+            )
+            if args.skip_existing and destination.exists():
+                LOGGER.info("skip existing product=%s split=%s", product, split)
+                continue
             build_split(
                 product=product,
                 split=split,
                 dates=dates,
                 dates_path=dates_path,
                 source_root=args.source_root,
-                destination=product_dir
-                / f"{split}_c{args.context_length}_h{args.horizon_length}",
+                destination=destination,
                 context_length=args.context_length,
                 horizon_length=args.horizon_length,
                 stride=args.stride,
                 interval_ns=interval_ns,
+                target_mode=args.target_mode,
+                tick_size=tick_size,
                 overwrite=args.overwrite,
             )
 

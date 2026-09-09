@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import math
+from typing import Literal
 
 import torch
 import torch.nn.functional as F
@@ -32,12 +33,16 @@ class ForecastLoss(nn.Module):
         quantiles: tuple[float, ...] | list[float],
         *,
         tick_size: float,
+        target_mode: Literal["level", "delta_ticks"] = "level",
         pinball_weight: float = 1.0,
+        include_median_in_pinball: bool = False,
         median_huber_weight: float = 0.5,
         crossing_weight: float = 0.05,
         huber_delta_ticks: float = 1.0,
     ) -> None:
         super().__init__()
+        if target_mode not in {"level", "delta_ticks"}:
+            raise ValueError(f"unsupported target_mode={target_mode!r}")
         if not math.isfinite(tick_size) or tick_size <= 0:
             raise ValueError("tick_size must be positive")
         if not math.isfinite(huber_delta_ticks) or huber_delta_ticks <= 0:
@@ -56,23 +61,31 @@ class ForecastLoss(nn.Module):
             raise ValueError("quantiles must be strictly increasing")
         self.register_buffer("quantiles_tensor", quantile_tensor, persistent=False)
         self.tick_size = tick_size
+        self.target_mode = target_mode
         self.pinball_weight = pinball_weight
+        self.include_median_in_pinball = include_median_in_pinball
         self.median_huber_weight = median_huber_weight
         self.crossing_weight = crossing_weight
         self.huber_delta_ticks = huber_delta_ticks
         self.median_index = int(torch.argmin(torch.abs(quantile_tensor - 0.5)).item())
         if abs(float(quantile_tensor[self.median_index]) - 0.5) > 1e-6:
             raise ValueError("balanced objective requires an explicit 0.5 quantile")
-        tail_indices = [
-            index for index in range(len(quantiles)) if index != self.median_index
+        pinball_indices = [
+            index
+            for index in range(len(quantiles))
+            if include_median_in_pinball or index != self.median_index
         ]
-        if not tail_indices:
-            raise ValueError("balanced objective requires at least one non-median quantile")
+        if not pinball_indices:
+            raise ValueError("objective requires at least one pinball quantile")
         self.register_buffer(
-            "tail_indices",
-            torch.tensor(tail_indices, dtype=torch.long),
+            "pinball_indices",
+            torch.tensor(pinball_indices, dtype=torch.long),
             persistent=False,
         )
+
+    @property
+    def pinball_quantile_count(self) -> int:
+        return int(self.pinball_indices.numel())
 
     def forward(
         self,
@@ -86,7 +99,9 @@ class ForecastLoss(nn.Module):
             raise ValueError("predictions must have shape (batch, horizon, quantiles)")
         if targets.shape != predictions.shape[:2]:
             raise ValueError("targets must match prediction batch and horizon")
-        if current_price.shape != (predictions.shape[0],):
+        if self.target_mode == "level" and current_price.shape != (
+            predictions.shape[0],
+        ):
             raise ValueError("current_price must have shape (batch,)")
         if predictions.shape[-1] != self.quantiles_tensor.numel():
             raise ValueError("prediction quantile count does not match configured quantiles")
@@ -103,22 +118,25 @@ class ForecastLoss(nn.Module):
         )
         if not torch.any(valid).item():
             raise ValueError("loss batch has no valid target values")
-        origin = current_price[:, None]
-        target_ticks = (targets - origin) / self.tick_size
-        prediction_ticks = (predictions - origin[:, :, None]) / self.tick_size
+        if self.target_mode == "delta_ticks":
+            target_ticks = targets
+            prediction_ticks = predictions
+        else:
+            origin = current_price[:, None]
+            target_ticks = (targets - origin) / self.tick_size
+            prediction_ticks = (predictions - origin[:, :, None]) / self.tick_size
 
-        # Tail quantiles learn the conditional distribution with pinball loss.
-        # P50 is intentionally excluded here because it receives dedicated,
-        # smooth Huber supervision below.
+        # Pinball supervises either all quantiles (pinball-only experiments) or
+        # the tails only when P50 receives dedicated Huber supervision.
         errors = target_ticks[:, :, None] - prediction_ticks
-        tail_indices = self.tail_indices.to(predictions.device)
-        tail_errors = errors.index_select(-1, tail_indices)
-        tail_quantiles = self.quantiles_tensor.to(predictions.device).index_select(
-            0, tail_indices
+        pinball_indices = self.pinball_indices.to(predictions.device)
+        pinball_errors = errors.index_select(-1, pinball_indices)
+        pinball_quantiles = self.quantiles_tensor.to(predictions.device).index_select(
+            0, pinball_indices
         )[None, None, :]
         pinball_values = torch.maximum(
-            tail_quantiles * tail_errors,
-            (tail_quantiles - 1.0) * tail_errors,
+            pinball_quantiles * pinball_errors,
+            (pinball_quantiles - 1.0) * pinball_errors,
         )
         pinball = _masked_mean(
             pinball_values,

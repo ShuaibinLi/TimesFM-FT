@@ -21,17 +21,18 @@
     "disable_iterative_cpm_revin": true
   },
   "adapter": {
-    "type": "head",
-    "last_n_layers": 1,
-    "rank": 1,
-    "alpha": 1.0,
+    "type": "full",
+    "last_n_layers": 4,
+    "rank": 8,
+    "alpha": 16.0,
     "dropout": 0.0
   },
   "objective": {
     "tick_size": 0.015625,
     "pinball_weight": 1.0,
-    "median_huber_weight": 0.5,
-    "crossing_weight": 0.05,
+    "include_median_in_pinball": true,
+    "median_huber_weight": 0.0,
+    "crossing_weight": 0.0,
     "huber_delta_ticks": 1.0
   },
   "optimizer": {
@@ -50,7 +51,7 @@
     "min_lr_ratio": 0.1
   },
   "trainer": {
-    "output_dir": "../outputs/zn-head-input-c256-h64",
+    "output_dir": "../outputs/zn-pinball-full-c256-h64",
     "epochs": 5,
     "batch_size": 32,
     "max_grad_norm": 1.0,
@@ -62,6 +63,6 @@
     "dtype": "bfloat16",
     "deterministic": true,
     "early_stopping_patience": 2,
-    "checkpoint_metric": "rmse_ticks"
+    "checkpoint_metric": "mean_pinball_ticks"
   }
 }

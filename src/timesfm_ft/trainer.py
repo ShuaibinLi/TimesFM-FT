@@ -139,6 +139,7 @@ def _run_epoch(
             quantiles=model.quantiles,
             tick_size=loss_fn.tick_size,
             sampling_interval_seconds=sampling_interval_seconds,
+            target_mode=loss_fn.target_mode,
         )
     )
 
@@ -211,7 +212,7 @@ def _run_epoch(
                         scheduler.step()
 
             counts = {
-                "pinball": valid_points * (len(model.quantiles) - 1),
+                "pinball": valid_points * loss_fn.pinball_quantile_count,
                 "huber": valid_points,
                 "crossing": valid_points * (len(model.quantiles) - 1),
             }
@@ -409,6 +410,8 @@ def train_experiment(config: ExperimentConfig) -> Path:
         expected_stride=config.data.stride,
         expected_product=config.data.product,
         expected_split="train",
+        expected_target_mode=config.data.target_mode,
+        expected_tick_size=config.objective.tick_size,
         expected_dates=_read_expected_dates(config.data.train_dates_path),
         expected_dates_path=config.data.train_dates_path,
         require_metadata=config.data.require_metadata,
@@ -422,6 +425,8 @@ def train_experiment(config: ExperimentConfig) -> Path:
         expected_stride=config.data.stride,
         expected_product=config.data.product,
         expected_split="val",
+        expected_target_mode=config.data.target_mode,
+        expected_tick_size=config.objective.tick_size,
         expected_dates=_read_expected_dates(config.data.val_dates_path),
         expected_dates_path=config.data.val_dates_path,
         require_metadata=config.data.require_metadata,
@@ -461,7 +466,9 @@ def train_experiment(config: ExperimentConfig) -> Path:
     loss_fn = ForecastLoss(
         model.quantiles,
         tick_size=config.objective.tick_size,
+        target_mode=config.data.target_mode,
         pinball_weight=config.objective.pinball_weight,
+        include_median_in_pinball=config.objective.include_median_in_pinball,
         median_huber_weight=config.objective.median_huber_weight,
         crossing_weight=config.objective.crossing_weight,
         huber_delta_ticks=config.objective.huber_delta_ticks,

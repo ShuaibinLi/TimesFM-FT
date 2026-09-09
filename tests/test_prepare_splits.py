@@ -74,6 +74,53 @@ def test_build_split_reads_multiple_parts_and_writes_audited_bundle(tmp_path):
     assert dataset.metadata is not None
     assert dataset.metadata["date_file_sha256"]
 
+    delta_destination = tmp_path / "train_delta_c16_h8"
+    module.build_split(
+        product="ZN",
+        split="train",
+        dates=[day],
+        dates_path=date_file,
+        source_root=str(source_root),
+        destination=delta_destination,
+        context_length=16,
+        horizon_length=8,
+        stride=8,
+        interval_ns=500_000_000,
+        target_mode="delta_ticks",
+        tick_size=0.01,
+    )
+    delta_dataset = NpzWindowDataset(
+        delta_destination,
+        context_length=16,
+        horizon_length=8,
+        sampling_interval_seconds=0.5,
+        expected_stride=8,
+        expected_product="ZN",
+        expected_split="train",
+        expected_target_mode="delta_ticks",
+        expected_tick_size=0.01,
+        expected_dates={20250102},
+        expected_dates_path=date_file,
+        require_metadata=True,
+    )
+    assert len(delta_dataset) == len(range(16, 25_192, 8))
+    np.testing.assert_allclose(
+        delta_dataset.context_values[0, 0],
+        0.01,
+        rtol=0,
+        atol=1e-5,
+    )
+    np.testing.assert_allclose(
+        delta_dataset.future_values[0],
+        0.01,
+        rtol=0,
+        atol=1e-5,
+    )
+    assert delta_dataset.cutoff_wmp is not None
+    assert delta_dataset.cutoff_wmp[0] == pytest.approx(wmp[16])
+    assert delta_dataset.timestamps is not None
+    assert delta_dataset.timestamps[0] == timestamps[16]
+
 
 def test_session_validation_rejects_truncated_open():
     module = _module()

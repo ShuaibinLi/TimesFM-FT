@@ -14,6 +14,7 @@ class DataConfig:
     val_path: str
     test_path: str | None = None
     product: str | None = None
+    target_mode: Literal["level", "delta_ticks"] = "level"
     context_length: int = 256
     horizon_length: int = 64
     stride: int = 64
@@ -49,6 +50,7 @@ class AdapterConfig:
 class ObjectiveConfig:
     tick_size: float
     pinball_weight: float = 1.0
+    include_median_in_pinball: bool = False
     median_huber_weight: float = 0.5
     crossing_weight: float = 0.05
     huber_delta_ticks: float = 1.0

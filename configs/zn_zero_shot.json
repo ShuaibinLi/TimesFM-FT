@@ -1,9 +1,10 @@
 {
   "data": {
-    "train_path": "../data/zn-wmp-500ms/splits/train_c256_h64",
-    "val_path": "../data/zn-wmp-500ms/splits/val_c256_h64",
-    "test_path": "../data/zn-wmp-500ms/splits/test_c256_h64",
+    "train_path": "../data/zn-wmp-500ms/splits/train_delta_c256_h64",
+    "val_path": "../data/zn-wmp-500ms/splits/val_delta_c256_h64",
+    "test_path": "../data/zn-wmp-500ms/splits/test_delta_c256_h64",
     "product": "ZN",
+    "target_mode": "delta_ticks",
     "context_length": 256,
     "horizon_length": 64,
     "stride": 64,
