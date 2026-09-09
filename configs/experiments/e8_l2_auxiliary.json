@@ -1,0 +1,15 @@
+{
+  "extends": "e7_l1_business.json",
+  "objective": {
+    "name": "l2",
+    "auxiliary_weight": 0.05,
+    "auxiliary_features": [
+      "realized_vol_15m",
+      "spread",
+      "volume"
+    ]
+  },
+  "trainer": {
+    "output_dir": "../../outputs/e8-l2-auxiliary"
+  }
+}

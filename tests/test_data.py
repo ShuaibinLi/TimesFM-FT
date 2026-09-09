@@ -41,6 +41,11 @@ def test_dynamic_context_and_future_alignment(bundle_factory):
     torch.testing.assert_close(sample["context_values"][0], torch.arange(5, dtype=torch.float32))
     torch.testing.assert_close(sample["future_values"], torch.tensor([5.0, 6.0, 7.0]))
     assert sample["past_future_values"].shape == (1, 8)
+    assert sample["past_only_future_values"].shape == (1, 3)
+    torch.testing.assert_close(
+        sample["past_only_future_values"][0],
+        torch.tensor([6.0, 7.0, 8.0]),
+    )
     assert sample["date"] == 20250102
     assert dataset[6]["date"] == 20250103
 
@@ -55,6 +60,9 @@ def test_collate_pads_only_to_patch_bucket_and_preserves_known_future(
     )
     assert batch["context_values"].shape == (2, 2, 8)
     assert batch["past_future_values"].shape == (2, 1, 11)
+    assert batch["past_only_future_values"].shape == (2, 1, 3)
+    assert batch["context_padding_mask"][0, :3].all()
+    assert not batch["context_padding_mask"][0, 3:].any()
     assert batch["context_mask"][0, :, :3].all()
     assert not batch["context_mask"][0, :, 3:].any()
     torch.testing.assert_close(
@@ -102,6 +110,25 @@ def test_target_definition_is_part_of_bundle_identity(bundle_factory):
         )
 
 
+def test_invalid_future_is_masked_and_invalid_cutoff_is_not_sampled(bundle_factory):
+    path, _ = bundle_factory("masked-target")
+    mask_path = path / "target_mask.npy"
+    mask = np.load(mask_path)
+    mask[0, 4] = True
+    np.save(mask_path, mask)
+    dataset = IntradayWindowDataset(
+        path,
+        context_min=4,
+        context_max=8,
+        horizon_length=3,
+        stride=1,
+    )
+    assert len(dataset) == 11
+    first = dataset[0]
+    assert first["future_mask"].tolist() == [True, False, False]
+    assert first["timestamp"] != int(dataset.timestamps[0, 4])
+
+
 def test_post_cutoff_past_only_changes_cannot_change_model_inputs(bundle_factory):
     path, _ = bundle_factory("causal")
     before = IntradayWindowDataset(
@@ -134,6 +161,26 @@ def test_rejects_non_minute_grid(bundle_factory):
     timestamps[0, 3] += 1
     np.save(timestamps_path, timestamps)
     with pytest.raises(ValueError, match="exact 1-minute"):
+        IntradayWindowDataset(
+            path,
+            context_min=4,
+            context_max=8,
+            horizon_length=3,
+            stride=1,
+        )
+
+
+def test_masked_covariates_still_require_finite_fill_values(bundle_factory):
+    path, _ = bundle_factory("bad-fill")
+    values_path = path / "past_only_values.npy"
+    mask_path = path / "past_only_mask.npy"
+    values = np.load(values_path)
+    mask = np.load(mask_path)
+    values[0, 0, 2] = np.nan
+    mask[0, 0, 2] = True
+    np.save(values_path, values)
+    np.save(mask_path, mask)
+    with pytest.raises(ValueError, match="finite fill"):
         IntradayWindowDataset(
             path,
             context_min=4,

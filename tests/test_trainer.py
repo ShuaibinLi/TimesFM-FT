@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 import torch
 from torch import nn
 
@@ -14,9 +15,14 @@ from timesfm_ft.config import (
     DataConfig,
     EvaluationConfig,
     ExperimentConfig,
+    ObjectiveConfig,
     TrainerConfig,
 )
-from timesfm_ft.losses import PinballLoss
+from timesfm_ft.losses import (
+    BusinessForecastLoss,
+    LossScaleState,
+    ScaleEstimate,
+)
 
 
 class _TinyForecast(nn.Module):
@@ -33,12 +39,44 @@ class _TinyForecast(nn.Module):
         *,
         horizon,
         context_mask=None,
+        context_padding_mask=None,
         past_future_values=None,
         past_future_mask=None,
     ):
-        del context_mask, past_future_values, past_future_mask
+        del (
+            context_mask,
+            context_padding_mask,
+            past_future_values,
+            past_future_mask,
+        )
         origin = context_values[:, 0, -1, None, None]
         return origin + self.offset.expand(len(context_values), horizon, 3)
+
+    def forward_all(
+        self,
+        context_values,
+        *,
+        horizon,
+        context_mask=None,
+        context_padding_mask=None,
+        past_future_values=None,
+        past_future_mask=None,
+    ):
+        target = self.forward(
+            context_values,
+            horizon=horizon,
+            context_mask=context_mask,
+            context_padding_mask=context_padding_mask,
+            past_future_values=past_future_values,
+            past_future_mask=past_future_mask,
+        )
+        past_only = target[:, None]
+        known_future = torch.full_like(past_only, float("nan"))
+        return torch.cat((target[:, None], past_only, known_future), dim=1)
+
+    def forward_unknown(self, context_values, **kwargs):
+        raw = self.forward_all(context_values, **kwargs)
+        return SimpleNamespace(target=raw[:, 0], past_only=raw[:, 1:2])
 
 
 class _CountingSgd(torch.optim.SGD):
@@ -55,8 +93,11 @@ def _batch(samples: int = 2, horizon: int = 2):
     return {
         "context_values": torch.ones(samples, 2, 4),
         "context_mask": torch.zeros(samples, 2, 4, dtype=torch.bool),
+        "context_padding_mask": torch.zeros(samples, 4, dtype=torch.bool),
         "past_future_values": torch.ones(samples, 1, 4 + horizon),
         "past_future_mask": torch.zeros(samples, 1, 4 + horizon, dtype=torch.bool),
+        "past_only_future_values": torch.ones(samples, 1, horizon),
+        "past_only_future_mask": torch.zeros(samples, 1, horizon, dtype=torch.bool),
         "future_values": torch.ones(samples, horizon),
         "future_mask": torch.zeros(samples, horizon, dtype=torch.bool),
         "context_lengths": torch.full((samples,), 4, dtype=torch.int16),
@@ -75,10 +116,24 @@ def test_gradient_accumulation_steps_partial_final_group():
     metrics = trainer._run_epoch(
         model,
         loader,
-        PinballLoss(model.quantiles),
+        BusinessForecastLoss(
+            model.quantiles,
+            objective=ObjectiveConfig(name="l0"),
+            scales=LossScaleState(
+                dataset_id="test",
+                date_file_sha256="test-dates",
+                feature_schema_sha256=None,
+                manifest_sha256="test-manifest",
+                cumulative_method="mad",
+                auxiliary_method="mad",
+                cumulative={},
+                auxiliary={},
+            ),
+        ),
         device=torch.device("cpu"),
         horizon=2,
         evaluation=EvaluationConfig(report_horizons=(1, 2), trading_horizon=2),
+        auxiliary_indices=torch.empty(0, dtype=torch.long),
         optimizer=optimizer,
         scheduler=None,
         gradient_accumulation_steps=2,
@@ -89,6 +144,81 @@ def test_gradient_accumulation_steps_partial_final_group():
     )
     assert optimizer.step_count == 2
     assert np.isfinite(metrics["mean_pinball"])
+
+
+def test_l2_routes_only_selected_past_only_raw_output():
+    model = _TinyForecast()
+    optimizer = _CountingSgd(model.parameters())
+    objective = ObjectiveConfig(
+        name="l2",
+        cumulative_huber_weight=0.3,
+        cumulative_horizons=(2,),
+        auxiliary_weight=0.05,
+        auxiliary_features=("p1",),
+    )
+    metrics = trainer._run_epoch(
+        model,
+        [_batch()],
+        BusinessForecastLoss(
+            model.quantiles,
+            objective=objective,
+            scales=LossScaleState(
+                dataset_id="test",
+                date_file_sha256="test-dates",
+                feature_schema_sha256=None,
+                manifest_sha256="test-manifest",
+                cumulative_method="mad",
+                auxiliary_method="mad",
+                cumulative={2: ScaleEstimate(1.0, "mad", 10, 1.0)},
+                auxiliary={"p1": ScaleEstimate(1.0, "mad", 10, 1.0)},
+            ),
+        ),
+        device=torch.device("cpu"),
+        horizon=2,
+        evaluation=EvaluationConfig(report_horizons=(1, 2), trading_horizon=2),
+        auxiliary_indices=torch.tensor([0]),
+        optimizer=optimizer,
+        scheduler=None,
+        gradient_accumulation_steps=1,
+        max_grad_norm=1.0,
+        epoch=1,
+        split="train",
+        log_every_steps=10,
+    )
+    assert np.isfinite(metrics["loss"])
+    assert metrics["auxiliary_pinball"] > 0
+
+
+def test_business_checkpoint_metrics_are_maximized():
+    metrics = {
+        "mean_pinball": 1.0,
+        "rmse": 2.0,
+        "cumulative_horizons": [
+            {"horizon_minutes": 5, "mean_daily_rank_ic": 0.1},
+            {"horizon_minutes": 15, "mean_daily_rank_ic": 0.2},
+            {"horizon_minutes": 30, "mean_daily_rank_ic": 0.3},
+            {"horizon_minutes": 60, "mean_daily_rank_ic": 0.4},
+        ],
+        "trading_proxy": {"net_mean": 0.03},
+    }
+    assert trainer._checkpoint_value(
+        metrics,
+        metric="mean_daily_rank_ic",
+        horizons=(5, 15, 30, 60),
+    ) == (
+        0.25,
+        "max",
+    )
+    assert trainer._checkpoint_value(metrics, metric="net_utility", horizons=(60,)) == (0.03, "max")
+    assert trainer._checkpoint_value(metrics, metric="mean_pinball", horizons=(60,)) == (1.0, "min")
+
+
+def test_scale_fallback_is_explicit_and_fingerprinted():
+    estimate = trainer._robust_scale(np.ones(5), "mad")
+    assert estimate.raw_value == 0.0
+    assert estimate.value == 1.0
+    assert estimate.fallback == "unit"
+    assert estimate.valid_count == 5
 
 
 class _CheckpointModel(_TinyForecast):
@@ -155,6 +285,8 @@ def _experiment(bundle_factory, tmp_path, *, resume_from=None):
             dtype="float32",
             deterministic=False,
             early_stopping_patience=1,
+            checkpoint_metric="mean_pinball",
+            checkpoint_horizons=(3,),
             resume_from=resume_from,
         ),
         evaluation=EvaluationConfig(
@@ -165,12 +297,62 @@ def _experiment(bundle_factory, tmp_path, *, resume_from=None):
     )
 
 
+def test_loss_scales_are_fitted_from_declared_training_bundle(
+    bundle_factory,
+    tmp_path,
+):
+    config = _experiment(bundle_factory, tmp_path)
+    dataset = trainer._dataset(
+        config,
+        path=config.data.train_path,
+        split="train",
+        dates_path=config.data.train_dates_path,
+    )
+    objective = ObjectiveConfig(
+        name="l2",
+        cumulative_huber_weight=0.3,
+        cumulative_horizons=(2, 3),
+        auxiliary_weight=0.05,
+        auxiliary_features=("p1",),
+    )
+    scales = trainer.fit_loss_scales(dataset, objective)
+    assert scales.source_split == "train"
+    assert set(scales.cumulative) == {2, 3}
+    assert scales.auxiliary["p1"].value > 0
+    assert scales.auxiliary["p1"].valid_count > 0
+    assert len(scales.fingerprint) == 64
+    val_dataset = trainer._dataset(
+        config,
+        path=config.data.val_path,
+        split="val",
+        dates_path=config.data.val_dates_path,
+    )
+    with pytest.raises(ValueError, match="split=train"):
+        trainer.fit_loss_scales(val_dataset, objective)
+
+
+def test_training_rejects_cross_split_feature_schema_drift(
+    bundle_factory,
+    tmp_path,
+):
+    config = _experiment(bundle_factory, tmp_path)
+    manifest_path = Path(config.data.val_path) / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["feature_schema_sha256"] = "different"
+    manifest_path.write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="feature_schema_sha256"):
+        trainer.train_experiment(config)
+
+
 def _epoch_metrics(*args, split, epoch, **kwargs):
     del args, kwargs
     value = 1.0 if epoch == 1 else 1.1
     result = {
         "loss": value,
         "mean_pinball": value,
+        "return_pinball": value,
+        "cumulative_huber": 0.0,
+        "auxiliary_pinball": 0.0,
         "rmse": value,
         "samples_per_second": 1.0,
     }
@@ -178,10 +360,23 @@ def _epoch_metrics(*args, split, epoch, **kwargs):
         result.update(
             {
                 "cumulative_horizons": [
-                    {"horizon_minutes": 1, "ic": 0.0},
-                    {"horizon_minutes": 3, "ic": 0.0},
+                    {
+                        "horizon_minutes": 1,
+                        "ic": 0.0,
+                        "mean_daily_rank_ic": 0.0,
+                    },
+                    {
+                        "horizon_minutes": 3,
+                        "ic": 0.0,
+                        "mean_daily_rank_ic": 0.0,
+                    },
                 ],
                 "slices": [],
+                "trading_proxy": {"net_mean": 0.0},
+                "mean_absolute_coverage_error": 0.0,
+                "q10_q90_coverage": 0.8,
+                "mean_q10_q90_width": 1.0,
+                "quantile_crossing_rate": 0.0,
             }
         )
     return result
@@ -202,5 +397,8 @@ def test_training_writes_versioned_resumable_state(monkeypatch, bundle_factory, 
         map_location="cpu",
         weights_only=False,
     )
-    assert state["format_version"] == 2
+    assert state["format_version"] == 3
+    assert state["loss_scales"]["source_split"] == "train"
+    scales_file = json.loads((output / "loss_scales.json").read_text())
+    assert scales_file["fingerprint"] == state["loss_scales"]["fingerprint"]
     assert (output / "best/adapter.pt").exists()

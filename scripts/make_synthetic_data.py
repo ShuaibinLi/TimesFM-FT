@@ -115,11 +115,18 @@ def _write_split(
             "return_type": "simple",
             "timestamp_semantics": "bar_end",
             "availability_lag_minutes": 0,
+            "missing_policy": "mask",
         },
         "frequency_minutes": 1,
         "session_minutes": session_minutes,
         "past_only_features": list(PAST_ONLY),
+        "past_only_availability_lag_minutes": {name: 0 for name in PAST_ONLY},
         "past_future_features": list(PAST_FUTURE),
+        "data_quality": {
+            "target_missing_total": 0,
+            "target_missing_by_day": {str(value): 0 for value in dates},
+            "past_only_missing_total": {name: 0 for name in PAST_ONLY},
+        },
         "date_file_sha256": hashlib.sha256(dates_path.read_bytes()).hexdigest(),
         "schema": {name: [str(values.dtype), *values.shape] for name, values in arrays.items()},
     }

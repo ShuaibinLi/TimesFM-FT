@@ -34,11 +34,14 @@ def test_prepare_builds_audited_minute_bundle(tmp_path):
             [int((start + timedelta(minutes=index)).timestamp() * 1e9) for index in range(minutes)],
             dtype=np.int64,
         )
+        target = np.arange(minutes, dtype=np.float32)
+        if date_value == dates[0]:
+            target[4] = np.nan
         pq.write_table(
             pa.table(
                 {
                     "timestamp_ns": timestamps,
-                    "return_1m": np.arange(minutes, dtype=np.float32),
+                    "return_1m": target,
                     "feature": np.linspace(0, 1, minutes, dtype=np.float32),
                 }
             ),
@@ -62,6 +65,7 @@ def test_prepare_builds_audited_minute_bundle(tmp_path):
                     "return_type": "simple",
                     "timestamp_semantics": "bar_end",
                     "availability_lag_minutes": 0,
+                    "missing_policy": "mask",
                 },
                 "session": {
                     "timezone": "UTC",
@@ -103,11 +107,42 @@ def test_prepare_builds_audited_minute_bundle(tmp_path):
         expected_dataset_id="prepared",
         expected_dates_path=dates_path,
     )
-    assert len(dataset) == 8
+    assert len(dataset) == 7
     sample = dataset[0]
     assert sample["past_future_values"].shape == (1, 5)
     assert sample["context_mask"][1, 0]
     assert sample["context_values"][1, 1] == 0.0
+    assert sample["future_mask"].tolist() == [False, True]
+    manifest = json.loads((destination / "manifest.json").read_text())
+    assert len(manifest["source_files"]) == 2
+    assert all(len(item["sha256"]) == 64 for item in manifest["source_files"])
+    assert len(manifest["source_snapshot_sha256"]) == 64
+    assert len(manifest["preparer_sha256"]) == 64
+
+    original_manifest = (destination / "manifest.json").read_bytes()
+    bad_part = source / f"date={dates[0]}" / "part0.parquet"
+    bad_table = pq.read_table(bad_part)
+    bad_timestamps = bad_table.column("timestamp_ns").to_numpy().copy()
+    bad_timestamps[0] += 1
+    pq.write_table(
+        bad_table.set_column(
+            0,
+            "timestamp_ns",
+            pa.array(bad_timestamps),
+        ),
+        bad_part,
+    )
+    with pytest.raises(ValueError, match="frozen"):
+        prepare.build_split(
+            schema=schema,
+            schema_path=schema_path,
+            source_root=str(source),
+            dates_path=dates_path,
+            split="train",
+            destination=destination,
+            overwrite=True,
+        )
+    assert (destination / "manifest.json").read_bytes() == original_manifest
 
 
 def test_split_audit_rejects_overlap(tmp_path):

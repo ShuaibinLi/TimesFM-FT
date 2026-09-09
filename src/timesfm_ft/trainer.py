@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import functools
+import hashlib
 import json
 import logging
 import math
@@ -19,14 +20,18 @@ from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
 
 from timesfm_ft.adapter import TimesFM3Adapter
-from timesfm_ft.config import EvaluationConfig, ExperimentConfig
+from timesfm_ft.config import EvaluationConfig, ExperimentConfig, ObjectiveConfig
 from timesfm_ft.data import (
     ContextBucketBatchSampler,
     IntradayWindowDataset,
     WindowBatch,
     collate_intraday_windows,
 )
-from timesfm_ft.losses import PinballLoss
+from timesfm_ft.losses import (
+    BusinessForecastLoss,
+    LossScaleState,
+    ScaleEstimate,
+)
 from timesfm_ft.metrics import ForecastMetricsAccumulator
 
 LOGGER = logging.getLogger(__name__)
@@ -117,14 +122,143 @@ def _make_loader(
     )
 
 
+def _robust_scale(values: np.ndarray, method: str) -> ScaleEstimate:
+    values = np.asarray(values, dtype=np.float64)
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        raise ValueError("cannot fit a loss scale without valid training values")
+    if method == "mad":
+        center = np.median(values)
+        raw_scale = 1.4826 * float(np.median(np.abs(values - center)))
+    elif method == "std":
+        raw_scale = float(np.std(values))
+    else:
+        raise ValueError(f"unsupported scale method={method!r}")
+    scale = raw_scale
+    fallback_name: str | None = None
+    if not math.isfinite(scale) or scale <= 1e-8:
+        std_fallback = float(np.std(values))
+        if math.isfinite(std_fallback) and std_fallback > 1e-8:
+            scale = std_fallback
+            fallback_name = "std"
+        else:
+            scale = 1.0
+            fallback_name = "unit"
+    return ScaleEstimate(
+        value=scale,
+        estimator=method,
+        valid_count=int(values.size),
+        raw_value=raw_scale,
+        fallback=fallback_name,
+    )
+
+
+def fit_loss_scales(
+    dataset: IntradayWindowDataset,
+    objective: ObjectiveConfig,
+) -> LossScaleState:
+    """Fits every L1/L2 normalization scale from the training bundle only."""
+
+    if dataset.metadata.get("split") != "train":
+        raise ValueError("loss scales may only be fitted from split=train")
+    cumulative_values: dict[int, list[float]] = {
+        horizon: [] for horizon in objective.cumulative_horizons
+    }
+    auxiliary_source_indices = {
+        feature: int(dataset._past_only_indices[dataset.past_only_features.index(feature)])
+        for feature in objective.auxiliary_features
+    }
+    auxiliary_values: dict[str, list[np.ndarray]] = {
+        feature: [] for feature in objective.auxiliary_features
+    }
+    for day_value, anchor_value in zip(
+        dataset._day_indices,
+        dataset._anchor_indices,
+        strict=True,
+    ):
+        day = int(day_value)
+        anchor = int(anchor_value)
+        start = anchor + 1
+        stop = start + dataset.horizon_length
+        for horizon in objective.cumulative_horizons:
+            target = dataset.target_values[day, start : start + horizon]
+            mask = dataset.target_mask[day, start : start + horizon]
+            if not mask.any():
+                cumulative_values[horizon].append(float(np.sum(target, dtype=np.float64)))
+        for feature, source_index in auxiliary_source_indices.items():
+            values = dataset._all_past_only_values[day, source_index, start:stop]
+            mask = dataset._all_past_only_mask[day, source_index, start:stop]
+            auxiliary_values[feature].append(np.asarray(values[~mask]))
+    cumulative_scales = {
+        horizon: _robust_scale(
+            np.asarray(values),
+            objective.cumulative_scale_method,
+        )
+        for horizon, values in cumulative_values.items()
+    }
+
+    auxiliary_scales = {
+        feature: _robust_scale(
+            np.concatenate(values) if values else np.asarray([]),
+            objective.auxiliary_scale_method,
+        )
+        for feature, values in auxiliary_values.items()
+    }
+    manifest_payload = json.dumps(
+        dataset.metadata,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode()
+    return LossScaleState(
+        dataset_id=str(dataset.metadata["dataset_id"]),
+        date_file_sha256=str(dataset.metadata["date_file_sha256"]),
+        feature_schema_sha256=dataset.metadata.get("feature_schema_sha256"),
+        manifest_sha256=hashlib.sha256(manifest_payload).hexdigest(),
+        cumulative_method=objective.cumulative_scale_method,
+        auxiliary_method=objective.auxiliary_scale_method,
+        cumulative=cumulative_scales,
+        auxiliary=auxiliary_scales,
+    )
+
+
+def _checkpoint_value(
+    metrics: dict[str, Any],
+    *,
+    metric: str,
+    horizons: tuple[int, ...],
+) -> tuple[float, str]:
+    if metric in {"mean_pinball", "rmse"}:
+        value = metrics.get(metric)
+        mode = "min"
+    elif metric == "mean_daily_rank_ic":
+        rows = {
+            int(item["horizon_minutes"]): item for item in metrics.get("cumulative_horizons", ())
+        }
+        values = [rows.get(horizon, {}).get("mean_daily_rank_ic") for horizon in horizons]
+        value = (
+            float(np.mean(values)) if values and all(item is not None for item in values) else None
+        )
+        mode = "max"
+    elif metric == "net_utility":
+        value = metrics.get("trading_proxy", {}).get("net_mean")
+        mode = "max"
+    else:
+        raise ValueError(f"unsupported checkpoint metric={metric!r}")
+    if value is None or not math.isfinite(float(value)):
+        raise FloatingPointError(f"validation checkpoint metric {metric}@{horizons} is not finite")
+    return float(value), mode
+
+
 def _run_epoch(
     model: TimesFM3Adapter,
     loader: DataLoader[WindowBatch],
-    loss_fn: PinballLoss,
+    loss_fn: BusinessForecastLoss,
     *,
     device: torch.device,
     horizon: int,
     evaluation: EvaluationConfig,
+    auxiliary_indices: torch.Tensor,
     optimizer: torch.optim.Optimizer | None,
     scheduler: LambdaLR | None,
     gradient_accumulation_steps: int,
@@ -135,8 +269,15 @@ def _run_epoch(
 ) -> dict[str, Any]:
     training = optimizer is not None
     model.train(training)
-    pinball_sum = torch.zeros((), device=device, dtype=torch.float64)
-    pinball_count = 0
+    component_sums = {
+        name: torch.zeros((), device=device, dtype=torch.float64)
+        for name in (
+            "return_pinball",
+            "cumulative_huber",
+            "auxiliary_pinball",
+        )
+    }
+    component_counts = {name: 0 for name in component_sums}
     sample_count = 0
     gradient_norm_total = 0.0
     optimizer_updates = 0
@@ -159,17 +300,41 @@ def _run_epoch(
     with grad_context():
         for step, raw_batch in enumerate(loader):
             batch = _move_batch(raw_batch, device)
-            predictions = model(
-                batch["context_values"],
-                horizon=horizon,
-                context_mask=batch["context_mask"],
-                past_future_values=batch["past_future_values"],
-                past_future_mask=batch["past_future_mask"],
-            )
+            model_kwargs = {
+                "horizon": horizon,
+                "context_mask": batch["context_mask"],
+                "context_padding_mask": batch["context_padding_mask"],
+                "past_future_values": batch["past_future_values"],
+                "past_future_mask": batch["past_future_mask"],
+            }
+            auxiliary_predictions: torch.Tensor | None = None
+            auxiliary_targets: torch.Tensor | None = None
+            auxiliary_mask: torch.Tensor | None = None
+            if auxiliary_indices.numel():
+                unknown_predictions = model.forward_unknown(
+                    batch["context_values"],
+                    **model_kwargs,
+                )
+                predictions = unknown_predictions.target
+                auxiliary_predictions = unknown_predictions.past_only.index_select(
+                    1, auxiliary_indices
+                )
+                auxiliary_targets = batch["past_only_future_values"].index_select(
+                    1, auxiliary_indices
+                )
+                auxiliary_mask = batch["past_only_future_mask"].index_select(1, auxiliary_indices)
+            else:
+                predictions = model(
+                    batch["context_values"],
+                    **model_kwargs,
+                )
             losses = loss_fn(
                 predictions,
                 batch["future_values"],
                 target_mask=batch["future_mask"],
+                auxiliary_predictions=auxiliary_predictions,
+                auxiliary_targets=auxiliary_targets,
+                auxiliary_mask=auxiliary_mask,
             )
             if not torch.isfinite(losses.total).item():
                 raise FloatingPointError(
@@ -224,24 +389,47 @@ def _run_epoch(
                     if scheduler is not None:
                         scheduler.step()
 
-            valid_points = int((~batch["future_mask"]).sum().item())
-            count = valid_points * loss_fn.quantile_count
-            pinball_sum.add_(losses.pinball.detach().double() * count)
-            pinball_count += count
+            component_values = {
+                "return_pinball": losses.return_pinball,
+                "cumulative_huber": losses.cumulative_huber,
+                "auxiliary_pinball": losses.auxiliary_pinball,
+            }
+            batch_counts = {
+                "return_pinball": losses.return_count,
+                "cumulative_huber": losses.cumulative_count,
+                "auxiliary_pinball": losses.auxiliary_count,
+            }
+            for name, value in component_values.items():
+                count = batch_counts[name]
+                component_sums[name].add_(value.detach().double() * count)
+                component_counts[name] += count
             sample_count += len(batch["future_values"])
             if training and ((step + 1) % log_every_steps == 0 or step + 1 == len(loader)):
+                running = {
+                    name: float(component_sums[name].item()) / max(component_counts[name], 1)
+                    for name in component_sums
+                }
+                running_total = (
+                    loss_fn.objective.return_pinball_weight * running["return_pinball"]
+                    + loss_fn.objective.cumulative_huber_weight * running["cumulative_huber"]
+                    + loss_fn.objective.auxiliary_weight * running["auxiliary_pinball"]
+                )
                 lr_text = " ".join(
                     f"lr_{name}={value:.3e}" for name, value in _learning_rates(optimizer).items()
                 )
                 LOGGER.info(
-                    "%s epoch=%d step=%d/%d batch_pinball=%.6f "
-                    "running_pinball=%.6f context_width=%d gradient_norm=%s %s",
+                    "%s epoch=%d step=%d/%d batch_loss=%.6f "
+                    "running_loss=%.6f return_pinball=%.6f cumulative_huber=%.6f "
+                    "auxiliary_pinball=%.6f context_width=%d gradient_norm=%s %s",
                     split,
                     epoch,
                     step + 1,
                     len(loader),
-                    float(losses.pinball.detach()),
-                    float(pinball_sum.item()) / max(pinball_count, 1),
+                    float(losses.total.detach()),
+                    running_total,
+                    running["return_pinball"],
+                    running["cumulative_huber"],
+                    running["auxiliary_pinball"],
                     batch["context_values"].shape[-1],
                     (
                         f"{latest_gradient_norm:.6f}"
@@ -252,9 +440,21 @@ def _run_epoch(
                 )
 
     elapsed = time.perf_counter() - started_at
+    components = {
+        name: float(component_sums[name].item()) / max(component_counts[name], 1)
+        for name in component_sums
+    }
+    total_loss = (
+        loss_fn.objective.return_pinball_weight * components["return_pinball"]
+        + loss_fn.objective.cumulative_huber_weight * components["cumulative_huber"]
+        + loss_fn.objective.auxiliary_weight * components["auxiliary_pinball"]
+    )
     metrics: dict[str, Any] = {
-        "loss": float(pinball_sum.item()) / max(pinball_count, 1),
-        "mean_pinball": float(pinball_sum.item()) / max(pinball_count, 1),
+        "loss": total_loss,
+        "return_pinball": components["return_pinball"],
+        "cumulative_huber": components["cumulative_huber"],
+        "auxiliary_pinball": components["auxiliary_pinball"],
+        "mean_pinball": components["return_pinball"],
         "elapsed_seconds": elapsed,
         "samples_per_second": sample_count / max(elapsed, 1e-9),
     }
@@ -316,9 +516,10 @@ def _training_state(
     config: ExperimentConfig,
     generator: torch.Generator,
     data_metadata: dict[str, Any],
+    loss_scales: LossScaleState,
 ) -> dict[str, Any]:
     return {
-        "format_version": 2,
+        "format_version": 3,
         "adapter": model.trainable_state_dict(),
         "optimizer": optimizer.state_dict(),
         "scheduler": scheduler.state_dict(),
@@ -329,6 +530,7 @@ def _training_state(
         "config": config.to_dict(),
         "rng": _rng_state(generator),
         "data_metadata": data_metadata,
+        "loss_scales": loss_scales.to_dict(),
     }
 
 
@@ -341,11 +543,12 @@ def _load_training_state(
     config: ExperimentConfig,
     generator: torch.Generator,
     data_metadata: dict[str, Any],
+    loss_scales: LossScaleState,
 ) -> tuple[int, float, int, list[dict[str, Any]]]:
     if path.is_dir():
         path = path / "training_state.pt"
     state = torch.load(path, map_location="cpu", weights_only=False)
-    if not isinstance(state, dict) or state.get("format_version") != 2:
+    if not isinstance(state, dict) or state.get("format_version") != 3:
         raise ValueError(f"unsupported training checkpoint: {path}")
     saved_config = state.get("config", {})
     current_config = config.to_dict()
@@ -369,6 +572,8 @@ def _load_training_state(
         raise ValueError("resume config mismatch in section trainer")
     if state.get("data_metadata") != data_metadata:
         raise ValueError("resume data metadata mismatch")
+    if state.get("loss_scales") != loss_scales.to_dict():
+        raise ValueError("resume loss-scale provenance mismatch")
     model.load_trainable_state_dict(state["adapter"])
     optimizer.load_state_dict(state["optimizer"])
     scheduler.load_state_dict(state["scheduler"])
@@ -406,6 +611,7 @@ def _dataset(
         expected_target_return_type=config.data.target_return_type,
         expected_target_timestamp_semantics=config.data.target_timestamp_semantics,
         expected_target_availability_lag_minutes=(config.data.target_availability_lag_minutes),
+        expected_target_missing_policy=config.data.target_missing_policy,
         expected_frequency_minutes=config.data.frequency_minutes,
         expected_session_minutes=config.data.session_minutes,
         expected_dates_path=dates_path,
@@ -433,6 +639,19 @@ def train_experiment(config: ExperimentConfig) -> Path:
     )
     if train_data.num_variates != val_data.num_variates:
         raise ValueError("train and validation variate counts differ")
+    for key in (
+        "dataset_id",
+        "product",
+        "target",
+        "frequency_minutes",
+        "session_minutes",
+        "past_only_features",
+        "past_only_availability_lag_minutes",
+        "past_future_features",
+        "feature_schema_sha256",
+    ):
+        if train_data.metadata.get(key) != val_data.metadata.get(key):
+            raise ValueError(f"train/validation bundle contract mismatch: {key}")
     overlap = set(int(value) for value in train_data.dates) & set(
         int(value) for value in val_data.dates
     )
@@ -465,7 +684,20 @@ def train_experiment(config: ExperimentConfig) -> Path:
         generator=None,
     )
 
-    loss_fn = PinballLoss(model.quantiles).to(device)
+    loss_scales = fit_loss_scales(train_data, config.objective)
+    loss_fn = BusinessForecastLoss(
+        model.quantiles,
+        objective=config.objective,
+        scales=loss_scales,
+    ).to(device)
+    auxiliary_indices = torch.tensor(
+        [
+            config.data.past_only_features.index(feature)
+            for feature in config.objective.auxiliary_features
+        ],
+        dtype=torch.long,
+        device=device,
+    )
     parameter_groups = model.optimizer_parameter_groups(config.optimizer)
     optimizer = torch.optim.AdamW(
         parameter_groups,
@@ -484,11 +716,15 @@ def train_experiment(config: ExperimentConfig) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     with (output_dir / "experiment_config.json").open("w", encoding="utf-8") as handle:
         json.dump(config.to_dict(), handle, indent=2, sort_keys=True)
+    with (output_dir / "loss_scales.json").open("w", encoding="utf-8") as handle:
+        json.dump(loss_scales.to_dict(), handle, indent=2, sort_keys=True)
     summary = model.parameter_summary
     LOGGER.info(
         "run_start checkpoint=%s adapter=%s device=%s dtype=%s "
         "train_samples=%d val_samples=%d variates=%d context=%d..%d horizon=%d "
-        "batch=%d effective_batch=%d trainable=%d total=%d",
+        "batch=%d effective_batch=%d objective=%s "
+        "return_weight=%.3f cumulative_weight=%.3f auxiliary_weight=%.3f "
+        "trainable=%d total=%d",
         config.model.checkpoint,
         config.adapter.type,
         device,
@@ -501,8 +737,18 @@ def train_experiment(config: ExperimentConfig) -> Path:
         config.data.horizon_length,
         config.trainer.batch_size,
         config.trainer.batch_size * config.trainer.gradient_accumulation_steps,
+        config.objective.name,
+        config.objective.return_pinball_weight,
+        config.objective.cumulative_huber_weight,
+        config.objective.auxiliary_weight,
         summary["trainable"],
         summary["total"],
+    )
+    LOGGER.info(
+        "loss_scales source=train cumulative=%s auxiliary=%s provenance=%s",
+        loss_scales.cumulative,
+        loss_scales.auxiliary,
+        loss_scales.date_file_sha256,
     )
     for group in optimizer.param_groups:
         LOGGER.info(
@@ -515,7 +761,10 @@ def train_experiment(config: ExperimentConfig) -> Path:
 
     data_metadata = {"train": train_data.metadata, "val": val_data.metadata}
     history: list[dict[str, Any]] = []
-    best_metric = float("inf")
+    checkpoint_mode = (
+        "min" if config.trainer.checkpoint_metric in {"mean_pinball", "rmse"} else "max"
+    )
+    best_metric = float("inf") if checkpoint_mode == "min" else float("-inf")
     stale_epochs = 0
     start_epoch = 1
     if config.trainer.resume_from is not None:
@@ -527,6 +776,7 @@ def train_experiment(config: ExperimentConfig) -> Path:
             config=config,
             generator=generator,
             data_metadata=data_metadata,
+            loss_scales=loss_scales,
         )
         LOGGER.info(
             "resumed checkpoint=%s start_epoch=%d best_%s=%.6f",
@@ -546,6 +796,7 @@ def train_experiment(config: ExperimentConfig) -> Path:
             device=device,
             horizon=config.data.horizon_length,
             evaluation=config.evaluation,
+            auxiliary_indices=auxiliary_indices,
             optimizer=optimizer,
             scheduler=scheduler,
             gradient_accumulation_steps=config.trainer.gradient_accumulation_steps,
@@ -561,6 +812,7 @@ def train_experiment(config: ExperimentConfig) -> Path:
             device=device,
             horizon=config.data.horizon_length,
             evaluation=config.evaluation,
+            auxiliary_indices=auxiliary_indices,
             optimizer=None,
             scheduler=None,
             gradient_accumulation_steps=1,
@@ -569,11 +821,18 @@ def train_experiment(config: ExperimentConfig) -> Path:
             split="val",
             log_every_steps=config.trainer.log_every_steps,
         )
-        selected = val_metrics.get(config.trainer.checkpoint_metric)
-        if selected is None or not math.isfinite(float(selected)):
-            raise FloatingPointError("validation checkpoint metric is not finite")
-        selected_metric = float(selected)
-        improved = selected_metric < best_metric
+        selected_metric, selected_mode = _checkpoint_value(
+            val_metrics,
+            metric=config.trainer.checkpoint_metric,
+            horizons=config.trainer.checkpoint_horizons,
+        )
+        if selected_mode != checkpoint_mode:
+            raise RuntimeError("checkpoint metric mode changed during training")
+        improved = (
+            selected_metric < best_metric
+            if checkpoint_mode == "min"
+            else selected_metric > best_metric
+        )
         if improved:
             best_metric = selected_metric
             stale_epochs = 0
@@ -586,6 +845,8 @@ def train_experiment(config: ExperimentConfig) -> Path:
             "val": val_metrics,
             "checkpoint": {
                 "metric": config.trainer.checkpoint_metric,
+                "horizons": config.trainer.checkpoint_horizons,
+                "mode": checkpoint_mode,
                 "value": selected_metric,
                 "best": best_metric,
                 "improved": improved,
@@ -594,20 +855,40 @@ def train_experiment(config: ExperimentConfig) -> Path:
         }
         history.append(record)
         _write_history(output_dir / "history.jsonl", history)
+        checkpoint_rows = [
+            row
+            for row in val_metrics["cumulative_horizons"]
+            if row["horizon_minutes"] in config.trainer.checkpoint_horizons
+        ]
+        rank_values = [
+            row["mean_daily_rank_ic"]
+            for row in checkpoint_rows
+            if row.get("mean_daily_rank_ic") is not None
+        ]
         LOGGER.info(
-            "epoch_end epoch=%d train_pinball=%.6f val_pinball=%.6f "
-            "val_rmse=%s val_ic60=%s train_sps=%.2f val_sps=%.2f",
+            "epoch_end epoch=%d train_loss=%.6f val_loss=%.6f "
+            "train_return_pinball=%.6f val_return_pinball=%.6f "
+            "train_cumulative_huber=%.6f val_cumulative_huber=%.6f "
+            "train_auxiliary_pinball=%.6f val_auxiliary_pinball=%.6f "
+            "checkpoint_%s_h%s=%.6f mean_daily_rank_ic=%s net_utility=%s "
+            "train_sps=%.2f val_sps=%.2f",
             epoch,
-            train_metrics["mean_pinball"],
-            val_metrics["mean_pinball"],
-            (f"{val_metrics['rmse']:.6f}" if val_metrics.get("rmse") is not None else "null"),
-            next(
-                (
-                    f"{row['ic']:.6f}"
-                    for row in val_metrics["cumulative_horizons"]
-                    if row["horizon_minutes"] == 60 and row["ic"] is not None
-                ),
-                "null",
+            train_metrics["loss"],
+            val_metrics["loss"],
+            train_metrics["return_pinball"],
+            val_metrics["return_pinball"],
+            train_metrics["cumulative_huber"],
+            val_metrics["cumulative_huber"],
+            train_metrics["auxiliary_pinball"],
+            val_metrics["auxiliary_pinball"],
+            config.trainer.checkpoint_metric,
+            ",".join(str(value) for value in config.trainer.checkpoint_horizons),
+            selected_metric,
+            (f"{np.mean(rank_values):.6f}" if rank_values else "null"),
+            (
+                f"{val_metrics['trading_proxy']['net_mean']:.6f}"
+                if val_metrics["trading_proxy"]["net_mean"] is not None
+                else "null"
             ),
             train_metrics["samples_per_second"],
             val_metrics["samples_per_second"],
@@ -623,7 +904,20 @@ def train_experiment(config: ExperimentConfig) -> Path:
             config=config,
             generator=generator,
             data_metadata=data_metadata,
+            loss_scales=loss_scales,
         )
+        validation_scorecard = {
+            "loss": val_metrics["loss"],
+            "return_pinball": val_metrics["return_pinball"],
+            "cumulative_huber": val_metrics["cumulative_huber"],
+            "auxiliary_pinball": val_metrics["auxiliary_pinball"],
+            "cumulative_horizons": val_metrics["cumulative_horizons"],
+            "mean_absolute_coverage_error": val_metrics["mean_absolute_coverage_error"],
+            "q10_q90_coverage": val_metrics["q10_q90_coverage"],
+            "mean_q10_q90_width": val_metrics["mean_q10_q90_width"],
+            "quantile_crossing_rate": val_metrics["quantile_crossing_rate"],
+            "trading_proxy": val_metrics["trading_proxy"],
+        }
         checkpoint_metadata = {
             "num_variates": train_data.num_variates,
             "context_min": config.data.context_min,
@@ -632,6 +926,11 @@ def train_experiment(config: ExperimentConfig) -> Path:
             "past_only_features": config.data.past_only_features,
             "past_future_features": config.data.past_future_features,
             "checkpoint_metric": config.trainer.checkpoint_metric,
+            "checkpoint_horizons": config.trainer.checkpoint_horizons,
+            "checkpoint_mode": checkpoint_mode,
+            "objective": config.objective.name,
+            "loss_scales": loss_scales.to_dict(),
+            "validation_scorecard": validation_scorecard,
             "data_metadata": data_metadata,
         }
         model.save_adapter(

@@ -73,6 +73,23 @@ def _max_drawdown(pnl: np.ndarray) -> float:
     return float(np.max(peaks - equity))
 
 
+def _prediction_deciles(
+    prediction: np.ndarray,
+    target: np.ndarray,
+) -> tuple[list[float], float | None, float | None]:
+    if len(prediction) < 10:
+        return [], None, None
+    order = np.argsort(prediction, kind="mergesort")
+    buckets = np.array_split(order, 10)
+    means = [float(np.mean(target[bucket])) for bucket in buckets if len(bucket)]
+    monotonicity = _rank_ic(
+        np.arange(len(means), dtype=np.float64),
+        np.asarray(means),
+    )
+    spread = means[-1] - means[0] if len(means) == 10 else None
+    return means, monotonicity, spread
+
+
 class ForecastMetricsAccumulator:
     """Accumulates multi-horizon metrics without mixing intraday sessions."""
 
@@ -322,9 +339,13 @@ class ForecastMetricsAccumulator:
         horizon: int,
         selection: np.ndarray | None = None,
     ) -> dict[str, Any]:
-        valid = arrays["valid"][:, :horizon].all(axis=1)
-        if selection is not None:
-            valid &= selection
+        eligible = (
+            np.ones(len(arrays["targets"]), dtype=np.bool_)
+            if selection is None
+            else selection.copy()
+        )
+        valid = eligible & arrays["valid"][:, :horizon].all(axis=1)
+        masked_path_excluded = int(eligible.sum() - valid.sum())
         targets = arrays["targets"][valid, :horizon].sum(axis=1)
         medians = arrays["predictions"][valid, :horizon, self.median_index].sum(axis=1)
         last = arrays["last_returns"][valid] * horizon
@@ -339,9 +360,11 @@ class ForecastMetricsAccumulator:
         short = medians < 0
         long_mean = float(targets[long].mean()) if long.any() else None
         short_mean = float(targets[short].mean()) if short.any() else None
+        decile_means, decile_monotonicity, decile_spread = _prediction_deciles(medians, targets)
         return {
             "horizon_minutes": horizon,
             "samples": int(len(targets)),
+            "masked_path_excluded": masked_path_excluded,
             "mae": float(np.mean(np.abs(error))) if len(error) else None,
             "rmse": float(np.sqrt(np.mean(error**2))) if len(error) else None,
             "ic": _pearson(medians, targets),
@@ -362,6 +385,9 @@ class ForecastMetricsAccumulator:
             "long_short_spread": (
                 long_mean - short_mean if long_mean is not None and short_mean is not None else None
             ),
+            "prediction_decile_means": decile_means,
+            "prediction_decile_monotonicity": decile_monotonicity,
+            "prediction_decile_spread": decile_spread,
         }
 
     def _trading_proxy(self, arrays: dict[str, np.ndarray]) -> dict[str, Any]:

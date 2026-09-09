@@ -22,10 +22,16 @@ class _Model:
         *,
         horizon,
         context_mask=None,
+        context_padding_mask=None,
         past_future_values=None,
         past_future_mask=None,
     ):
-        del context_mask, past_future_values, past_future_mask
+        del (
+            context_mask,
+            context_padding_mask,
+            past_future_values,
+            past_future_mask,
+        )
         last = context_values[:, 0, -1, None, None]
         return last.expand(len(context_values), horizon, 3)
 
@@ -60,6 +66,8 @@ def _config(bundle_factory, tmp_path):
             num_workers=0,
             device="cpu",
             dtype="float32",
+            checkpoint_metric="mean_pinball",
+            checkpoint_horizons=(3,),
         ),
         evaluation=EvaluationConfig(
             report_horizons=(1, 3),

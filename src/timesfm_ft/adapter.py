@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import math
 import os
@@ -12,6 +13,12 @@ import torch
 from torch import nn
 
 from timesfm_ft.config import AdapterConfig, ModelConfig, OptimizerConfig
+
+
+@dataclasses.dataclass(frozen=True)
+class UnknownForecasts:
+    target: torch.Tensor
+    past_only: torch.Tensor
 
 
 class LoRALinear(nn.Module):
@@ -281,6 +288,7 @@ class TimesFM3Adapter(nn.Module):
         *,
         horizon: int,
         context_mask: torch.Tensor | None = None,
+        context_padding_mask: torch.Tensor | None = None,
         past_future_values: torch.Tensor | None = None,
         past_future_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -290,16 +298,64 @@ class TimesFM3Adapter(nn.Module):
         past-only; ``past_future_values`` covers context plus the full horizon.
         """
 
+        return self.forward_unknown(
+            context_values,
+            horizon=horizon,
+            context_mask=context_mask,
+            context_padding_mask=context_padding_mask,
+            past_future_values=past_future_values,
+            past_future_mask=past_future_mask,
+        ).target
+
+    def forward_unknown(
+        self,
+        context_values: torch.Tensor,
+        *,
+        horizon: int,
+        context_mask: torch.Tensor | None = None,
+        context_padding_mask: torch.Tensor | None = None,
+        past_future_values: torch.Tensor | None = None,
+        past_future_mask: torch.Tensor | None = None,
+    ) -> UnknownForecasts:
+        """Returns only future-unknown target and past-only variate rows."""
+
+        raw = self.forward_all(
+            context_values,
+            horizon=horizon,
+            context_mask=context_mask,
+            context_padding_mask=context_padding_mask,
+            past_future_values=past_future_values,
+            past_future_mask=past_future_mask,
+        )
+        past_only_count = context_values.shape[1] - 1
+        return UnknownForecasts(
+            target=raw[:, 0],
+            past_only=raw[:, 1 : 1 + past_only_count],
+        )
+
+    def forward_all(
+        self,
+        context_values: torch.Tensor,
+        *,
+        horizon: int,
+        context_mask: torch.Tensor | None = None,
+        context_padding_mask: torch.Tensor | None = None,
+        past_future_values: torch.Tensor | None = None,
+        past_future_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Returns raw target, past-only, then past-future variate forecasts."""
+
         decode_kwargs = self._prepare_decode_inputs(
             context_values,
             horizon=horizon,
             context_mask=context_mask,
+            context_padding_mask=context_padding_mask,
             past_future_values=past_future_values,
             past_future_mask=past_future_mask,
         )
         with self._autocast_context():
             all_quantiles = self._decode_impl(self.backbone, **decode_kwargs)
-        return all_quantiles[:, 0, :horizon, :]
+        return all_quantiles[:, :, :horizon, :]
 
     @torch.inference_mode()
     def predict(
@@ -308,6 +364,7 @@ class TimesFM3Adapter(nn.Module):
         *,
         horizon: int,
         context_mask: torch.Tensor | None = None,
+        context_padding_mask: torch.Tensor | None = None,
         past_future_values: torch.Tensor | None = None,
         past_future_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -317,6 +374,7 @@ class TimesFM3Adapter(nn.Module):
             context_values,
             horizon=horizon,
             context_mask=context_mask,
+            context_padding_mask=context_padding_mask,
             past_future_values=past_future_values,
             past_future_mask=past_future_mask,
         )
@@ -330,6 +388,7 @@ class TimesFM3Adapter(nn.Module):
         *,
         horizon: int,
         context_mask: torch.Tensor | None,
+        context_padding_mask: torch.Tensor | None = None,
         past_future_values: torch.Tensor | None = None,
         past_future_mask: torch.Tensor | None = None,
     ) -> dict[str, Any]:
@@ -339,6 +398,15 @@ class TimesFM3Adapter(nn.Module):
             raise ValueError("horizon must be positive")
         if context_mask is not None and context_mask.shape != context_values.shape:
             raise ValueError("context_mask must match context_values")
+        expected_padding_shape = (
+            context_values.shape[0],
+            context_values.shape[2],
+        )
+        if (
+            context_padding_mask is not None
+            and context_padding_mask.shape != expected_padding_shape
+        ):
+            raise ValueError(f"context_padding_mask must have shape {expected_padding_shape}")
         known_variates = 0
         if past_future_values is not None:
             if past_future_values.ndim != 3:
@@ -380,7 +448,6 @@ class TimesFM3Adapter(nn.Module):
             )
         target = context_values[:, :1, :]
         target_mask = context_mask[:, :1, :] if context_mask is not None else None
-        global_mask = context_mask[:, 0, :] if context_mask is not None else None
         covariates = context_values[:, 1:, :] if context_values.shape[1] > 1 else None
         covariate_mask = (
             context_mask[:, 1:, :]
@@ -393,7 +460,7 @@ class TimesFM3Adapter(nn.Module):
             "past_only_covariates": covariates,
             "target_mask": target_mask,
             "past_only_mask": covariate_mask,
-            "mask": global_mask,
+            "mask": context_padding_mask,
             "past_future_covariates": (past_future_values if known_variates else None),
             "past_future_mask": (past_future_mask if known_variates else None),
         }
@@ -483,10 +550,21 @@ class TimesFM3Adapter(nn.Module):
         metadata_path = destination / "adapter_config.json"
         temporary_metadata = metadata_path.with_suffix(".json.tmp")
         with temporary_metadata.open("w", encoding="utf-8") as handle:
-            json.dump(combined_metadata, handle, indent=2, sort_keys=True)
+            json.dump(
+                combined_metadata,
+                handle,
+                indent=2,
+                sort_keys=True,
+                allow_nan=False,
+            )
         os.replace(temporary_metadata, metadata_path)
 
-    def load_adapter(self, path: str | Path) -> None:
+    def load_adapter(
+        self,
+        path: str | Path,
+        *,
+        expected_metadata: dict[str, Any] | None = None,
+    ) -> None:
         """Loads parameters after applying the matching tuning configuration."""
 
         checkpoint_path = Path(path)
@@ -495,15 +573,15 @@ class TimesFM3Adapter(nn.Module):
             raise ValueError(f"adapter metadata not found: {metadata_path}")
         with metadata_path.open(encoding="utf-8") as handle:
             metadata = json.load(handle)
-        expected_metadata = {
+        required_metadata = {
             "checkpoint": self.checkpoint,
             "tuning_mode": self.tuning_mode,
             "trainable_names": list(self.trainable_names),
             "quantiles": list(self.quantiles),
             "use_linear_detrending": bool(self.backbone.use_linear_detrending),
             "use_iterative_cpm_revin": bool(self.backbone.use_iterative_cpm_revin),
-        }
-        for key, expected_value in expected_metadata.items():
+        } | (expected_metadata or {})
+        for key, expected_value in required_metadata.items():
             if metadata.get(key) != expected_value:
                 raise ValueError(
                     f"adapter metadata mismatch for {key}: "

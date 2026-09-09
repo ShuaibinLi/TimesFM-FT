@@ -67,10 +67,17 @@ def _load_schema(path: Path) -> dict[str, Any]:
         "return_type",
         "timestamp_semantics",
         "availability_lag_minutes",
+        "missing_policy",
     }
     missing_target = sorted(target_required - set(schema["target"]))
     if missing_target:
         raise ValueError(f"target definition is incomplete: {missing_target}")
+    if schema["target"]["missing_policy"] != "mask":
+        raise ValueError("v1.3 requires target missing_policy='mask'")
+    if schema["target"]["timestamp_semantics"] != "bar_end":
+        raise ValueError("v1.3 window alignment requires bar_end targets")
+    if schema["target"]["availability_lag_minutes"] != 0:
+        raise ValueError("v1.3 requires target availability_lag_minutes=0")
     for entry in schema["past_only_features"]:
         required_feature = {
             "name",
@@ -115,12 +122,22 @@ def _read_date(
     fs: fsspec.AbstractFileSystem,
     parts: list[str],
     columns: list[str],
-) -> pa.Table:
+) -> tuple[pa.Table, list[dict[str, Any]]]:
     tables = []
+    records: list[dict[str, Any]] = []
     for part in parts:
         with fs.open(part, "rb") as stream:
-            tables.append(pq.read_table(stream, columns=columns))
-    return tables[0] if len(tables) == 1 else pa.concat_tables(tables)
+            payload = stream.read()
+        tables.append(pq.read_table(pa.BufferReader(payload), columns=columns))
+        records.append(
+            {
+                "path": part,
+                "bytes": len(payload),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+            }
+        )
+    table = tables[0] if len(tables) == 1 else pa.concat_tables(tables)
+    return table, records
 
 
 def _expected_timestamps(
@@ -220,7 +237,6 @@ def build_split(
     if destination.exists():
         if not overwrite:
             raise FileExistsError(f"{destination} exists; pass --overwrite")
-        shutil.rmtree(destination)
     if temporary.exists():
         shutil.rmtree(temporary)
     temporary.mkdir(parents=True)
@@ -239,6 +255,9 @@ def build_split(
         ],
         axis=0,
     ).astype(np.float32, copy=False)
+    target_missing_by_day: dict[str, int] = {}
+    feature_missing_counts = np.zeros(len(past_columns), dtype=np.int64)
+    source_files: list[dict[str, Any]] = []
 
     for index, date_value in enumerate(dates):
         parts = _parts_for_date(
@@ -247,7 +266,8 @@ def build_split(
             schema["path_template"],
             date_value,
         )
-        table = _read_date(fs, parts, source_columns)
+        table, date_source_files = _read_date(fs, parts, source_columns)
+        source_files.extend(date_source_files)
         timestamp = table.column(timestamp_column).to_numpy(zero_copy_only=False)
         order = np.argsort(timestamp, kind="stable")
         timestamp = np.asarray(timestamp[order], dtype=np.int64)
@@ -263,10 +283,16 @@ def build_split(
             table.column(target_column).to_numpy(zero_copy_only=False)[order],
             dtype=np.float32,
         )
-        if not np.isfinite(target).all():
-            raise ValueError(f"{date_value} target contains missing/non-finite values")
-        arrays["target_values"][index] = target
-        arrays["target_mask"][index] = False
+        target_mask = ~np.isfinite(target)
+        target_missing_by_day[str(date_value)] = int(target_mask.sum())
+        arrays["target_values"][index] = np.nan_to_num(
+            target,
+            copy=False,
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        )
+        arrays["target_mask"][index] = target_mask
         for feature_index, column in enumerate(past_columns):
             values = np.asarray(
                 table.column(column).to_numpy(zero_copy_only=False)[order],
@@ -290,6 +316,7 @@ def build_split(
                 neginf=0.0,
             )
             arrays["past_only_mask"][index, feature_index] = mask
+            feature_missing_counts[feature_index] += int(mask.sum())
         arrays["past_future_values"][index] = known_features
         arrays["past_future_mask"][index] = False
         arrays["timestamps"][index] = timestamp
@@ -310,6 +337,16 @@ def build_split(
         "split": split,
         "source_root": source_root,
         "path_template": schema["path_template"],
+        "source_files": source_files,
+        "source_snapshot_sha256": hashlib.sha256(
+            json.dumps(
+                source_files,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest(),
+        "preparer": Path(__file__).name,
+        "preparer_sha256": _sha256(Path(__file__).resolve()),
         "feature_schema": str(schema_path),
         "feature_schema_sha256": _sha256(schema_path),
         "target_name": schema["target"]["name"],
@@ -326,6 +363,16 @@ def build_split(
             for entry in schema["past_only_features"]
         },
         "past_future_features": [entry["name"] for entry in schema["past_future_features"]],
+        "data_quality": {
+            "target_missing_total": sum(target_missing_by_day.values()),
+            "target_missing_by_day": target_missing_by_day,
+            "past_only_missing_total": {
+                name: int(feature_missing_counts[index])
+                for index, name in enumerate(
+                    entry["name"] for entry in schema["past_only_features"]
+                )
+            },
+        },
         "dates": len(dates),
         "first_date": dates[0],
         "last_date": dates[-1],
@@ -337,7 +384,19 @@ def build_split(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-    os.replace(temporary, destination)
+    if destination.exists():
+        backup = destination.with_name(f".{destination.name}.backup")
+        if backup.exists():
+            shutil.rmtree(backup)
+        os.replace(destination, backup)
+        try:
+            os.replace(temporary, destination)
+        except BaseException:
+            os.replace(backup, destination)
+            raise
+        shutil.rmtree(backup)
+    else:
+        os.replace(temporary, destination)
     LOGGER.info("wrote split=%s bundle=%s", split, destination)
 
 

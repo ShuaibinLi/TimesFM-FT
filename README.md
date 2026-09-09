@@ -22,7 +22,8 @@ does not preserve its data, config, metric, or checkpoint contracts.
 - past-future inputs: known calendar values over context plus horizon
 - session rule: no sample crosses a trade-date/session boundary
 - model budget: target + all covariates must not exceed 32 variates
-- objective: Pinball loss over all nine TimesFM quantiles
+- objective: L0 target Pinball, recommended L1 cumulative-Huber extension, and
+  optional L2 selected past-only auxiliary ablation
 - split rule: chronological, whole-day train/validation/test partitions
 
 Context is dynamic. A sample with 83 real minutes is grouped into the 96-point
@@ -30,17 +31,24 @@ patch bucket and receives 13 masked values on the left. It is not padded to the
 configured 192-minute maximum. The default patch buckets are 64, 96, 128, 160,
 and 192 minutes.
 
-The model predicts `return_1m[t+1:t+64]`. Cumulative 5/10/20/30/60-minute point
+`context_padding_mask` marks only that shared left padding. Target and
+covariate missingness remain in separate per-variate masks, so a halted/missing
+target minute does not erase an otherwise available conditioning feature.
+
+The model predicts `return_1m[t+1:t+64]`. Cumulative 5/10/15/20/30/60-minute point
 forecasts are sums of the predicted medians. Quantile paths are evaluated per
 lead; quantiles are not summed and mislabeled as cumulative quantiles.
+For fractional simple returns this sum is a documented small-return
+approximation; exact compounding or direct multi-horizon targets belong to the
+planned follow-up experiment.
 
 ## Repository layout
 
 ```text
 configs/
 ├── datasets/intraday_1min_schema.json # source columns and frozen target semantics
-├── experiments/                    # E0-E5 matrix
-├── smoke.json
+├── experiments/                    # E0-E8 matrix
+├── smoke{,_l1,_l2}.json
 └── splits/                         # chronological date lists
 scripts/
 ├── prepare_intraday_splits.py
@@ -48,11 +56,12 @@ scripts/
 ├── make_synthetic_data.py
 ├── run_baseline.py
 ├── run_train_nohup.sh
+├── run_loss_matrix_nohup.sh
 └── run_zero_shot_matrix_nohup.sh
 src/timesfm_ft/
 ├── adapter.py       # differentiable official decode + both covariate classes
 ├── data.py          # audited session bundles and dynamic context buckets
-├── losses.py        # pure Pinball objective
+├── losses.py        # L0/L1/L2 business objectives and train-only scales
 ├── metrics.py       # IC/rank IC/calibration/slices/trading proxy
 ├── baselines.py     # Ridge and optional LightGBM controls
 ├── trainer.py
@@ -78,9 +87,16 @@ resampled or accepted as the plan's neutral 390×1min source.
 6. version `dataset_id` whenever any of these facts changes.
 
 The preparer deliberately does not recompute the target. It rejects duplicate,
-missing, non-minute, non-390-row, or non-finite target sessions.
+non-minute, or non-390-row sessions. Missing/halted target minutes are stored as
+finite fill values with `target_mask=True`; invalid cutoffs are skipped and all
+affected loss terms receive zero weight.
+The active v1.3 slicer deliberately accepts only `bar_end` with zero target
+availability lag; other semantics fail closed until their decision-time
+alignment is specified and tested.
 Non-zero feature availability lags are applied before bundle creation, with the
 new leading unavailable rows masked rather than backfilled.
+Every source Parquet part is content-hashed; the manifest also records the
+combined source snapshot and preparer-script hash.
 Create new source-derived `configs/splits/dates-{train,val,test}.txt` files as
 described in `configs/splits/README.md`; the archived 500 ms lists are not
 active defaults.
@@ -137,6 +153,9 @@ The checked-in matrix isolates one change at a time:
 - E3: E2 with `C_max=128`
 - E4: E2 with `C_max=256`
 - E5: E2 with `C_min=96`
+- E6: E2 fine-tuned with L0 target Pinball
+- E7: E2 fine-tuned with L1 = L0 + `0.3 ×` cumulative P50 Huber
+- E8: E7 + `0.05 ×` selected past-only auxiliary Pinball
 
 Run a zero-shot experiment:
 
@@ -161,6 +180,29 @@ scripts/run_train_nohup.sh configs/experiments/e2_past_future.json
 The default adaptation is head-only. Change `adapter.type` to `lora` only for a
 separate, matched experiment. The official TimesFM submodule remains unmodified.
 
+Run the gated L0 → L1 → L2 comparison under `nohup`:
+
+```bash
+scripts/run_loss_matrix_nohup.sh
+```
+
+L1 cumulative scales at 5/15/30/60 minutes and L2 feature scales are fitted
+only from the declared training bundle. Their values, method, date-list hash,
+feature-schema/manifest hashes, valid counts, raw estimates, explicit fallback,
+and state fingerprint are written to `loss_scales.json` and embedded in every
+checkpoint. Past-future rows are structurally excluded from the objective-facing
+`forward_unknown()` output and never enter forecast supervision.
+
+L0 Pinball remains in the frozen target unit exactly as specified by v1.3,
+whereas L1/L2 add normalized components. Consequently `0.3` and `0.05` are
+unit-specific starting weights, not portable constants: changing ticks/bps/log
+units requires a new dataset ID and validation ablation.
+
+Production configs select checkpoints by the mean validation daily rank IC
+across 5/15/30/60 minutes, not by total loss. History and
+checkpoint metadata retain IC, rank IC, direction, prediction deciles,
+calibration, net utility, turnover, and drawdown for the final joint decision.
+
 ## Required baselines
 
 Ridge and LightGBM consume the same selected variables and chronological split.
@@ -183,12 +225,17 @@ Evaluation writes:
 
 - `summary.json`: overall errors, zero/last-return controls, calibration, and
   the overlapping-signal trading proxy;
-- `per_lead.csv`: 1 through 64-minute lead metrics, IC, rank IC, coverage, and
-  crossings;
-- `cumulative_horizons.csv`: point metrics at configured cumulative horizons;
+- `per_lead.csv`: 1 through 64-minute lead metrics, daily IC/rank IC,
+  Q10–Q90 coverage/width, and crossings;
+- `cumulative_horizons.csv`: point metrics, daily IC/rank IC, direction,
+  conditional means, and prediction-decile monotonicity;
 - `slices.csv`: context-length, session-phase, and volatility slices;
 - `predictions.npz`: targets, all quantiles, timestamps, dates, and context
   lengths when enabled.
+
+“Daily IC” here means time-series correlation across intraday decision windows,
+computed within each trade date and then averaged across dates. It is not a
+cross-sectional multi-instrument IC.
 
 The trading number is explicitly labeled a research proxy. It is not a
 capacity-valid backtest; production evaluation still needs a frozen spread,

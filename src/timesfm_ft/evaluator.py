@@ -68,6 +68,12 @@ def evaluate_experiment(
         else:
             selected_path = Path(config.data.val_path)
             dates_path = config.data.val_dates_path
+    dataset = _dataset(
+        config,
+        path=str(selected_path),
+        split=selected_split,
+        dates_path=dates_path,
+    )
     device = resolve_device(device_name or config.trainer.device)
     model = TimesFM3Adapter.from_pretrained(
         config.model,
@@ -77,14 +83,18 @@ def evaluate_experiment(
         configure_for_training=adapter_path is not None,
     )
     if adapter_path is not None:
-        model.load_adapter(adapter_path)
+        model.load_adapter(
+            adapter_path,
+            expected_metadata={
+                "num_variates": dataset.num_variates,
+                "context_min": config.data.context_min,
+                "context_max": config.data.context_max,
+                "horizon_length": config.data.horizon_length,
+                "past_only_features": list(config.data.past_only_features),
+                "past_future_features": list(config.data.past_future_features),
+            },
+        )
     model.eval()
-    dataset = _dataset(
-        config,
-        path=str(selected_path),
-        split=selected_split,
-        dates_path=dates_path,
-    )
     loader = _make_loader(
         dataset,
         batch_size=batch_size or config.trainer.batch_size,
@@ -119,6 +129,7 @@ def evaluate_experiment(
             batch["context_values"],
             horizon=config.data.horizon_length,
             context_mask=batch["context_mask"],
+            context_padding_mask=batch["context_padding_mask"],
             past_future_values=batch["past_future_values"],
             past_future_mask=batch["past_future_mask"],
         )

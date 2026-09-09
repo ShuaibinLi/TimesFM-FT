@@ -28,10 +28,10 @@ def test_ridge_uses_fixed_causal_summary_and_writes_report(bundle_factory, tmp_p
     test_path, test_dates = bundle_factory("test", split="test", start_date=20250202)
     train = _dataset(train_path, train_dates, "train")
     test = _dataset(test_path, test_dates, "test")
-    features, targets, names = summarize_samples(train)
+    features, targets, target_mask, names = summarize_samples(train)
     assert features.shape[0] == len(train)
     assert features.shape[1] == len(names)
-    prediction = RidgeBaseline(alpha=1.0).fit(features, targets).predict(features)
+    prediction = RidgeBaseline(alpha=1.0).fit(features, targets, target_mask).predict(features)
     assert prediction.shape == targets.shape
     assert np.isfinite(prediction).all()
 

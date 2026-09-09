@@ -10,7 +10,8 @@
     "price_source": "frozen_source_price",
     "return_type": "simple",
     "timestamp_semantics": "bar_end",
-    "availability_lag_minutes": 0
+    "availability_lag_minutes": 0,
+    "missing_policy": "mask"
   },
   "session": {
     "timezone": "America/New_York",

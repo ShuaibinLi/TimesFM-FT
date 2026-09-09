@@ -50,6 +50,7 @@ def _load_training_rows(
     if manifest.get("split") != "train":
         raise ValueError("feature selection is allowed only on split=train")
     target = np.load(bundle / "target_values.npy", mmap_mode="r")
+    target_mask = np.load(bundle / "target_mask.npy", mmap_mode="r")
     features = np.load(bundle / "past_only_values.npy", mmap_mode="r")
     masks = np.load(bundle / "past_only_mask.npy", mmap_mode="r")
     lengths = np.load(bundle / "session_lengths.npy", mmap_mode="r")
@@ -60,11 +61,16 @@ def _load_training_rows(
     for day, length_value in enumerate(lengths):
         length = int(length_value)
         for anchor in range(context_min - 1, length - max_horizon, stride):
+            future_slice = slice(anchor + 1, anchor + 1 + max_horizon)
+            if target_mask[day, anchor] or target_mask[day, future_slice].any():
+                continue
             rows.append(features[day, :, anchor])
             row_masks.append(masks[day, :, anchor])
-            future = target[day, anchor + 1 : anchor + 1 + max_horizon]
+            future = target[day, future_slice]
             cumulative = np.cumsum(future, dtype=np.float64)
             labels.append(np.asarray([cumulative[horizon - 1] for horizon in horizons]))
+    if not rows:
+        raise ValueError("training bundle has no fully valid feature-selection rows")
     return np.stack(rows), np.stack(row_masks), np.stack(labels), manifest
 
 

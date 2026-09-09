@@ -83,3 +83,33 @@ def test_metrics_detect_crossing_and_nonfinite_predictions():
             torch.zeros_like(targets, dtype=torch.bool),
             **_metadata(1),
         )
+
+
+def test_prediction_decile_monotonicity_is_reported():
+    samples = 20
+    target = torch.arange(samples, dtype=torch.float32)[:, None]
+    predictions = target[:, :, None].repeat(1, 1, 3)
+    accumulator = ForecastMetricsAccumulator(
+        horizon=1,
+        quantiles=(0.1, 0.5, 0.9),
+        report_horizons=(1,),
+        trading_horizon=1,
+        cost_per_turnover=0.0,
+    )
+    accumulator.update(
+        predictions,
+        target,
+        torch.zeros_like(target, dtype=torch.bool),
+        last_returns=torch.zeros(samples),
+        context_lengths=torch.full((samples,), 64),
+        dates=torch.tensor(
+            [20250102] * 10 + [20250103] * 10,
+            dtype=torch.int32,
+        ),
+        timestamps=torch.arange(samples, dtype=torch.int64) + 1,
+        minute_indices=torch.full((samples,), 63),
+        context_volatility=torch.ones(samples),
+    )
+    _, _, cumulative, _ = accumulator.results()
+    assert cumulative[0]["prediction_decile_monotonicity"] == pytest.approx(1.0)
+    assert cumulative[0]["prediction_decile_spread"] > 0

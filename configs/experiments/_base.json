@@ -11,6 +11,7 @@
     "target_return_type": "simple",
     "target_timestamp_semantics": "bar_end",
     "target_availability_lag_minutes": 0,
+    "target_missing_policy": "mask",
     "frequency_minutes": 1,
     "context_min": 64,
     "context_max": 192,
@@ -41,7 +42,15 @@
     "lora_feedforward": true
   },
   "objective": {
-    "name": "pinball"
+    "name": "l0",
+    "return_pinball_weight": 1.0,
+    "cumulative_huber_weight": 0.0,
+    "cumulative_horizons": [],
+    "cumulative_scale_method": "mad",
+    "cumulative_huber_delta": 1.0,
+    "auxiliary_weight": 0.0,
+    "auxiliary_features": [],
+    "auxiliary_scale_method": "mad"
   },
   "optimizer": {
     "name": "adamw",
@@ -71,10 +80,11 @@
     "dtype": "bfloat16",
     "deterministic": true,
     "early_stopping_patience": 2,
-    "checkpoint_metric": "mean_pinball"
+    "checkpoint_metric": "mean_daily_rank_ic",
+    "checkpoint_horizons": [5, 15, 30, 60]
   },
   "evaluation": {
-    "report_horizons": [1, 5, 10, 20, 30, 60],
+    "report_horizons": [1, 5, 10, 15, 20, 30, 60],
     "trading_horizon": 60,
     "cost_per_turnover": 0.0,
     "save_predictions": true

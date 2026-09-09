@@ -87,10 +87,12 @@ def bundle_factory(tmp_path):
                 "return_type": "simple",
                 "timestamp_semantics": "bar_end",
                 "availability_lag_minutes": 0,
+                "missing_policy": "mask",
             },
             "frequency_minutes": 1,
             "session_minutes": minutes,
             "past_only_features": list(past_names),
+            "past_only_availability_lag_minutes": {name: 0 for name in past_names},
             "past_future_features": list(known_names),
             "date_file_sha256": hashlib.sha256(dates_path.read_bytes()).hexdigest(),
             "schema": {

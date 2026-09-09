@@ -11,6 +11,7 @@
     "target_return_type": "simple",
     "target_timestamp_semantics": "bar_end",
     "target_availability_lag_minutes": 0,
+    "target_missing_policy": "mask",
     "frequency_minutes": 1,
     "context_min": 64,
     "context_max": 96,
@@ -44,7 +45,12 @@
     "last_n_layers": 1
   },
   "objective": {
-    "name": "pinball"
+    "name": "l0",
+    "return_pinball_weight": 1.0,
+    "cumulative_huber_weight": 0.0,
+    "cumulative_horizons": [],
+    "auxiliary_weight": 0.0,
+    "auxiliary_features": []
   },
   "trainer": {
     "output_dir": "../outputs/smoke",
@@ -59,7 +65,8 @@
     "dtype": "float32",
     "deterministic": false,
     "early_stopping_patience": null,
-    "checkpoint_metric": "mean_pinball"
+    "checkpoint_metric": "mean_pinball",
+    "checkpoint_horizons": [16]
   },
   "evaluation": {
     "report_horizons": [1, 5, 10, 16],

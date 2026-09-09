@@ -1,0 +1,9 @@
+{
+  "extends": "e2_past_future.json",
+  "objective": {
+    "name": "l0"
+  },
+  "trainer": {
+    "output_dir": "../../outputs/e6-l0-pinball"
+  }
+}

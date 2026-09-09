@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import math
 from pathlib import Path
 from typing import Any, Literal
 
@@ -21,6 +22,7 @@ class DataConfig:
     target_return_type: Literal["simple", "log"] = "simple"
     target_timestamp_semantics: Literal["bar_start", "bar_end"] = "bar_end"
     target_availability_lag_minutes: int = 0
+    target_missing_policy: Literal["mask"] = "mask"
     frequency_minutes: int = 1
     context_min: int = 64
     context_max: int = 192
@@ -57,7 +59,15 @@ class AdapterConfig:
 
 @dataclasses.dataclass(frozen=True)
 class ObjectiveConfig:
-    name: Literal["pinball"] = "pinball"
+    name: Literal["l0", "l1", "l2"] = "l0"
+    return_pinball_weight: float = 1.0
+    cumulative_huber_weight: float = 0.0
+    cumulative_horizons: tuple[int, ...] = ()
+    cumulative_scale_method: Literal["mad", "std"] = "mad"
+    cumulative_huber_delta: float = 1.0
+    auxiliary_weight: float = 0.0
+    auxiliary_features: tuple[str, ...] = ()
+    auxiliary_scale_method: Literal["mad", "std"] = "mad"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -93,13 +103,19 @@ class TrainerConfig:
     dtype: Literal["float32", "bfloat16"] = "bfloat16"
     deterministic: bool = True
     early_stopping_patience: int | None = 2
-    checkpoint_metric: Literal["mean_pinball", "rmse"] = "mean_pinball"
+    checkpoint_metric: Literal[
+        "mean_pinball",
+        "rmse",
+        "mean_daily_rank_ic",
+        "net_utility",
+    ] = "mean_daily_rank_ic"
+    checkpoint_horizons: tuple[int, ...] = (5, 15, 30, 60)
     resume_from: str | None = None
 
 
 @dataclasses.dataclass(frozen=True)
 class EvaluationConfig:
-    report_horizons: tuple[int, ...] = (1, 5, 10, 20, 30, 60)
+    report_horizons: tuple[int, ...] = (1, 5, 10, 15, 20, 30, 60)
     trading_horizon: int = 60
     cost_per_turnover: float = 0.0
     save_predictions: bool = True
@@ -164,6 +180,8 @@ class ExperimentConfig:
                 data[key] = resolve_path(data[key])
 
         trainer = dict(raw.get("trainer", {}))
+        if "checkpoint_horizons" in trainer:
+            trainer["checkpoint_horizons"] = tuple(trainer["checkpoint_horizons"])
         if "output_dir" in trainer:
             trainer["output_dir"] = resolve_path(trainer["output_dir"])
         if "resume_from" in trainer:
@@ -178,11 +196,15 @@ class ExperimentConfig:
         evaluation["report_horizons"] = tuple(
             evaluation.get("report_horizons", EvaluationConfig().report_horizons)
         )
+        objective = dict(raw.get("objective", {}))
+        for key in ("cumulative_horizons", "auxiliary_features"):
+            if key in objective:
+                objective[key] = tuple(objective[key])
         config = cls(
             data=DataConfig(**data),
             model=ModelConfig(**model),
             adapter=AdapterConfig(**raw.get("adapter", {})),
-            objective=ObjectiveConfig(**raw.get("objective", {})),
+            objective=ObjectiveConfig(**objective),
             optimizer=OptimizerConfig(**raw.get("optimizer", {})),
             scheduler=SchedulerConfig(**raw.get("scheduler", {})),
             trainer=TrainerConfig(**trainer),
@@ -200,6 +222,8 @@ class ExperimentConfig:
             raise ValueError("v1 requires frequency_minutes=1")
         if data.target_availability_lag_minutes != 0:
             raise ValueError("v1 requires target_availability_lag_minutes=0")
+        if data.target_timestamp_semantics != "bar_end":
+            raise ValueError("v1.3 window alignment currently requires bar_end targets")
         if not 0 < data.context_min <= data.context_max:
             raise ValueError("context lengths must satisfy 0 < context_min <= context_max")
         if data.horizon_length <= 0 or data.stride <= 0:
@@ -239,8 +263,66 @@ class ExperimentConfig:
             if data.test_path is not None and data.test_dates_path is None:
                 raise ValueError("test_dates_path is required with test_path")
 
-        if self.objective.name != "pinball":
-            raise ValueError("v1 supports only the pinball objective")
+        objective = self.objective
+        if objective.name not in {"l0", "l1", "l2"}:
+            raise ValueError(f"unsupported objective name={objective.name!r}")
+        if objective.cumulative_scale_method not in {"mad", "std"}:
+            raise ValueError("unsupported cumulative_scale_method")
+        if objective.auxiliary_scale_method not in {"mad", "std"}:
+            raise ValueError("unsupported auxiliary_scale_method")
+        if (
+            objective.cumulative_horizons
+            and tuple(sorted(set(objective.cumulative_horizons))) != objective.cumulative_horizons
+        ):
+            raise ValueError("cumulative_horizons must be unique and sorted")
+        if (
+            objective.cumulative_horizons
+            and objective.cumulative_horizons[-1] > data.horizon_length
+        ):
+            raise ValueError("cumulative_horizons cannot exceed horizon_length")
+        weights = (
+            objective.return_pinball_weight,
+            objective.cumulative_huber_weight,
+            objective.auxiliary_weight,
+        )
+        if any(not math.isfinite(weight) or weight < 0 for weight in weights):
+            raise ValueError("objective weights must be finite and non-negative")
+        if objective.return_pinball_weight <= 0:
+            raise ValueError("return_pinball_weight must be positive")
+        if objective.cumulative_huber_weight > 0 and not objective.cumulative_horizons:
+            raise ValueError("positive cumulative_huber_weight requires cumulative_horizons")
+        if (
+            not math.isfinite(objective.cumulative_huber_delta)
+            or objective.cumulative_huber_delta <= 0
+        ):
+            raise ValueError("cumulative_huber_delta must be positive")
+        if len(set(objective.auxiliary_features)) != len(objective.auxiliary_features):
+            raise ValueError("auxiliary_features contains duplicates")
+        missing_auxiliary = set(objective.auxiliary_features) - set(data.past_only_features)
+        if missing_auxiliary:
+            raise ValueError(
+                "auxiliary_features must be selected past-only features: "
+                f"{sorted(missing_auxiliary)}"
+            )
+        if objective.name == "l0" and (
+            objective.cumulative_huber_weight != 0
+            or objective.cumulative_horizons
+            or objective.auxiliary_weight != 0
+            or objective.auxiliary_features
+        ):
+            raise ValueError("L0 must use return Pinball only")
+        if objective.name == "l1" and (
+            objective.cumulative_huber_weight <= 0
+            or objective.auxiliary_weight != 0
+            or objective.auxiliary_features
+        ):
+            raise ValueError("L1 requires cumulative Huber and no auxiliary loss")
+        if objective.name == "l2" and (
+            objective.cumulative_huber_weight <= 0
+            or objective.auxiliary_weight <= 0
+            or not objective.auxiliary_features
+        ):
+            raise ValueError("L2 requires cumulative Huber plus selected auxiliary features")
         if self.adapter.last_n_layers <= 0:
             raise ValueError("last_n_layers must be positive")
         if self.adapter.type == "lora" and self.adapter.rank <= 0:
@@ -287,6 +369,13 @@ class ExperimentConfig:
             raise ValueError("invalid max_grad_norm/num_workers")
         if trainer.early_stopping_patience is not None and trainer.early_stopping_patience <= 0:
             raise ValueError("early_stopping_patience must be positive or null")
+        if (
+            not trainer.checkpoint_horizons
+            or tuple(sorted(set(trainer.checkpoint_horizons))) != trainer.checkpoint_horizons
+        ):
+            raise ValueError("checkpoint_horizons must be non-empty, unique, and sorted")
+        if trainer.checkpoint_horizons[-1] > data.horizon_length:
+            raise ValueError("checkpoint_horizons cannot exceed horizon_length")
 
         evaluation = self.evaluation
         if (
@@ -300,3 +389,11 @@ class ExperimentConfig:
             raise ValueError("trading_horizon must be within the forecast horizon")
         if evaluation.cost_per_turnover < 0:
             raise ValueError("cost_per_turnover must be non-negative")
+        if trainer.checkpoint_metric in {"mean_daily_rank_ic", "net_utility"} and not set(
+            trainer.checkpoint_horizons
+        ).issubset(evaluation.report_horizons):
+            raise ValueError("business checkpoint_horizons must be in evaluation.report_horizons")
+        if trainer.checkpoint_metric == "net_utility" and trainer.checkpoint_horizons != (
+            evaluation.trading_horizon,
+        ):
+            raise ValueError("net_utility requires only evaluation.trading_horizon")

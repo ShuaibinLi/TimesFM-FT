@@ -14,7 +14,7 @@ import torch
 from timesfm_ft import trainer
 from timesfm_ft.adapter import TimesFM3Adapter
 from timesfm_ft.config import ExperimentConfig, ModelConfig
-from timesfm_ft.losses import PinballLoss
+from timesfm_ft.losses import BusinessForecastLoss
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -68,17 +68,44 @@ def main() -> None:
         generator=None,
     )
     batch = trainer._move_batch(next(iter(loader)), device)
-    prediction = model(
-        batch["context_values"],
-        horizon=config.data.horizon_length,
-        context_mask=batch["context_mask"],
-        past_future_values=batch["past_future_values"],
-        past_future_mask=batch["past_future_mask"],
+    model_kwargs = {
+        "horizon": config.data.horizon_length,
+        "context_mask": batch["context_mask"],
+        "context_padding_mask": batch["context_padding_mask"],
+        "past_future_values": batch["past_future_values"],
+        "past_future_mask": batch["past_future_mask"],
+    }
+    auxiliary_indices = torch.tensor(
+        [
+            config.data.past_only_features.index(feature)
+            for feature in config.objective.auxiliary_features
+        ],
+        dtype=torch.long,
+        device=device,
     )
-    loss = PinballLoss(model.quantiles).to(device)(
+    auxiliary_prediction = None
+    auxiliary_target = None
+    auxiliary_mask = None
+    if auxiliary_indices.numel():
+        unknown_prediction = model.forward_unknown(batch["context_values"], **model_kwargs)
+        prediction = unknown_prediction.target
+        auxiliary_prediction = unknown_prediction.past_only.index_select(1, auxiliary_indices)
+        auxiliary_target = batch["past_only_future_values"].index_select(1, auxiliary_indices)
+        auxiliary_mask = batch["past_only_future_mask"].index_select(1, auxiliary_indices)
+    else:
+        prediction = model(batch["context_values"], **model_kwargs)
+    loss_scales = trainer.fit_loss_scales(dataset, config.objective)
+    loss = BusinessForecastLoss(
+        model.quantiles,
+        objective=config.objective,
+        scales=loss_scales,
+    ).to(device)(
         prediction,
         batch["future_values"],
         target_mask=batch["future_mask"],
+        auxiliary_predictions=auxiliary_prediction,
+        auxiliary_targets=auxiliary_target,
+        auxiliary_mask=auxiliary_mask,
     )
     loss.total.backward()
     gradient_norm = torch.nn.utils.clip_grad_norm_(
@@ -91,6 +118,7 @@ def main() -> None:
         batch["context_values"],
         horizon=config.data.horizon_length,
         context_mask=batch["context_mask"],
+        context_padding_mask=batch["context_padding_mask"],
         past_future_values=batch["past_future_values"],
         past_future_mask=batch["past_future_mask"],
     )
@@ -108,6 +136,7 @@ def main() -> None:
             batch["context_values"],
             horizon=config.data.horizon_length,
             context_mask=batch["context_mask"],
+            context_padding_mask=batch["context_padding_mask"],
             past_future_values=batch["past_future_values"],
             past_future_mask=batch["past_future_mask"],
         )
@@ -121,6 +150,10 @@ def main() -> None:
                 "past_future_shape": list(batch["past_future_values"].shape),
                 "prediction_shape": list(prediction.shape),
                 "loss": float(loss.total.detach()),
+                "return_pinball": float(loss.return_pinball.detach()),
+                "cumulative_huber": float(loss.cumulative_huber.detach()),
+                "auxiliary_pinball": float(loss.auxiliary_pinball.detach()),
+                "loss_scale_fingerprint": loss_scales.fingerprint,
                 "gradient_norm": float(gradient_norm),
                 "save_load_parity": True,
             },

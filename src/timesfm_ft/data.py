@@ -15,7 +15,7 @@ import torch
 from torch.utils.data import Dataset, Sampler
 
 BUNDLE_FORMAT = "timesfm-ft-intraday-minute-bundle"
-BUNDLE_VERSION = 1
+BUNDLE_VERSION = 2
 
 
 class WindowSample(TypedDict):
@@ -23,6 +23,8 @@ class WindowSample(TypedDict):
     context_mask: torch.Tensor
     past_future_values: torch.Tensor
     past_future_mask: torch.Tensor
+    past_only_future_values: torch.Tensor
+    past_only_future_mask: torch.Tensor
     future_values: torch.Tensor
     future_mask: torch.Tensor
     context_length: int
@@ -36,8 +38,11 @@ class WindowSample(TypedDict):
 class WindowBatch(TypedDict):
     context_values: torch.Tensor
     context_mask: torch.Tensor
+    context_padding_mask: torch.Tensor
     past_future_values: torch.Tensor
     past_future_mask: torch.Tensor
+    past_only_future_values: torch.Tensor
+    past_only_future_mask: torch.Tensor
     future_values: torch.Tensor
     future_mask: torch.Tensor
     context_lengths: torch.Tensor
@@ -105,6 +110,7 @@ class IntradayWindowDataset(Dataset[WindowSample]):
         expected_target_return_type: str | None = None,
         expected_target_timestamp_semantics: str | None = None,
         expected_target_availability_lag_minutes: int | None = None,
+        expected_target_missing_policy: str | None = None,
         expected_frequency_minutes: int | None = None,
         expected_session_minutes: int | None = None,
         expected_dates_path: str | Path | None = None,
@@ -177,6 +183,7 @@ class IntradayWindowDataset(Dataset[WindowSample]):
             expected_target_return_type=expected_target_return_type,
             expected_target_timestamp_semantics=expected_target_timestamp_semantics,
             expected_target_availability_lag_minutes=(expected_target_availability_lag_minutes),
+            expected_target_missing_policy=expected_target_missing_policy,
             expected_frequency_minutes=expected_frequency_minutes,
             expected_session_minutes=expected_session_minutes,
             expected_dates_path=expected_dates_path,
@@ -193,6 +200,14 @@ class IntradayWindowDataset(Dataset[WindowSample]):
                 session_length - self.horizon_length,
                 self.stride,
             ):
+                if self.target_mask[day_index, anchor]:
+                    continue
+                future = slice(
+                    anchor + 1,
+                    anchor + 1 + self.horizon_length,
+                )
+                if self.target_mask[day_index, future].all():
+                    continue
                 day_indices.append(day_index)
                 anchor_indices.append(anchor)
                 context_lengths.append(min(self.context_max, anchor + 1))
@@ -285,10 +300,11 @@ class IntradayWindowDataset(Dataset[WindowSample]):
             raise ValueError("dates must be strictly increasing")
         for day, length_value in enumerate(lengths):
             length = int(length_value)
-            if arrays["target_mask"][day, :length].any():
-                raise ValueError("target return must be available for every real minute")
             if not np.isfinite(arrays["target_values"][day, :length]).all():
-                raise ValueError("target_values contains non-finite real minutes")
+                raise ValueError("target_values must store finite fill values for masked minutes")
+            for values_name in ("past_only_values", "past_future_values"):
+                if not np.isfinite(arrays[values_name][day, :, :length]).all():
+                    raise ValueError(f"{values_name} must store finite fill values")
             timestamps = arrays["timestamps"][day, :length]
             if length > 1 and not np.all(np.diff(timestamps) == 60_000_000_000):
                 raise ValueError("timestamps must form an exact 1-minute grid per day")
@@ -307,6 +323,7 @@ class IntradayWindowDataset(Dataset[WindowSample]):
         expected_target_return_type: str | None,
         expected_target_timestamp_semantics: str | None,
         expected_target_availability_lag_minutes: int | None,
+        expected_target_missing_policy: str | None,
         expected_frequency_minutes: int | None,
         expected_session_minutes: int | None,
         expected_dates_path: str | Path | None,
@@ -336,6 +353,7 @@ class IntradayWindowDataset(Dataset[WindowSample]):
             "return_type": expected_target_return_type,
             "timestamp_semantics": expected_target_timestamp_semantics,
             "availability_lag_minutes": expected_target_availability_lag_minutes,
+            "missing_policy": expected_target_missing_policy,
         }
         target_mismatches = {
             key: (target.get(key) if isinstance(target, dict) else None, value)
@@ -384,6 +402,12 @@ class IntradayWindowDataset(Dataset[WindowSample]):
         known_mask = self._all_past_future_mask[
             day, self._past_future_indices, context_start:future_stop
         ]
+        past_only_future_values = self._all_past_only_values[
+            day, self._past_only_indices, future_start:future_stop
+        ]
+        past_only_future_mask = self._all_past_only_mask[
+            day, self._past_only_indices, future_start:future_stop
+        ]
         future_values = self.target_values[day, future_start:future_stop]
         future_mask = self.target_mask[day, future_start:future_stop]
         valid_context = target_context[~target_context_mask]
@@ -393,6 +417,10 @@ class IntradayWindowDataset(Dataset[WindowSample]):
             "context_mask": torch.from_numpy(np.array(context_mask, copy=True)),
             "past_future_values": torch.from_numpy(np.array(known_values, copy=True)),
             "past_future_mask": torch.from_numpy(np.array(known_mask, copy=True)),
+            "past_only_future_values": torch.from_numpy(
+                np.array(past_only_future_values, copy=True)
+            ),
+            "past_only_future_mask": torch.from_numpy(np.array(past_only_future_mask, copy=True)),
             "future_values": torch.from_numpy(np.array(future_values, copy=True)),
             "future_mask": torch.from_numpy(np.array(future_mask, copy=True)),
             "context_length": context_length,
@@ -477,6 +505,7 @@ def collate_intraday_windows(
     batch_size = len(samples)
     context_values = torch.zeros(batch_size, context_variates, padded_context, dtype=torch.float32)
     context_mask = torch.ones_like(context_values, dtype=torch.bool)
+    context_padding_mask = torch.ones(batch_size, padded_context, dtype=torch.bool)
     known_values = torch.zeros(
         batch_size,
         future_variates,
@@ -490,6 +519,7 @@ def collate_intraday_windows(
         left = padded_context - length
         context_values[index, :, left:] = sample["context_values"]
         context_mask[index, :, left:] = sample["context_mask"]
+        context_padding_mask[index, left:] = False
         known_values[index, :, left:padded_context] = sample["past_future_values"][:, :length]
         known_values[index, :, padded_context:] = sample["past_future_values"][:, length:]
         known_mask[index, :, left:padded_context] = sample["past_future_mask"][:, :length]
@@ -498,8 +528,15 @@ def collate_intraday_windows(
     return {
         "context_values": context_values,
         "context_mask": context_mask,
+        "context_padding_mask": context_padding_mask,
         "past_future_values": known_values,
         "past_future_mask": known_mask,
+        "past_only_future_values": torch.stack(
+            [sample["past_only_future_values"] for sample in samples]
+        ),
+        "past_only_future_mask": torch.stack(
+            [sample["past_only_future_mask"] for sample in samples]
+        ),
         "future_values": torch.stack([sample["future_values"] for sample in samples]),
         "future_mask": torch.stack([sample["future_mask"] for sample in samples]),
         "context_lengths": torch.tensor(

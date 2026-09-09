@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 import torch
 from timesfm3 import (
     ResidualBlockConfig,
@@ -56,7 +57,7 @@ def test_adapter_matches_official_decode_with_both_covariate_classes():
     known = torch.randn(2, 2, 22)
     known_mask = torch.zeros_like(known, dtype=torch.bool)
     known_mask[0, :, :3] = True
-    expected = backbone.decode(
+    expected_all = backbone.decode(
         target=context[:, :1],
         horizon=6,
         past_only_covariates=context[:, 1:],
@@ -64,17 +65,39 @@ def test_adapter_matches_official_decode_with_both_covariate_classes():
         target_mask=context_mask[:, :1],
         past_only_mask=context_mask[:, 1:],
         past_future_mask=known_mask,
-    )[:, 0]
+        mask=context_mask[:, 0],
+    )
     configure_tuning(backbone, mode="head", last_n_layers=1)
     adapter = TimesFM3Adapter(backbone)
+    raw = adapter.forward_all(
+        context,
+        horizon=6,
+        context_mask=context_mask,
+        context_padding_mask=context_mask[:, 0],
+        past_future_values=known,
+        past_future_mask=known_mask,
+    )
     actual = adapter(
         context,
         horizon=6,
         context_mask=context_mask,
+        context_padding_mask=context_mask[:, 0],
         past_future_values=known,
         past_future_mask=known_mask,
     )
-    torch.testing.assert_close(actual, expected)
+    unknown = adapter.forward_unknown(
+        context,
+        horizon=6,
+        context_mask=context_mask,
+        context_padding_mask=context_mask[:, 0],
+        past_future_values=known,
+        past_future_mask=known_mask,
+    )
+    torch.testing.assert_close(raw, expected_all)
+    torch.testing.assert_close(actual, expected_all[:, 0])
+    torch.testing.assert_close(unknown.target, expected_all[:, 0])
+    torch.testing.assert_close(unknown.past_only, expected_all[:, 1:3])
+    assert raw.shape == (2, 5, 6, 3)
     actual.sum().backward()
     assert torch.isfinite(backbone.output_head.weight.grad).all()
 
@@ -107,6 +130,24 @@ def test_constant_target_and_known_event_covariate_have_finite_gradients():
             assert torch.isfinite(parameter.grad).all(), name
 
 
+def test_padding_mask_is_distinct_from_target_missing_mask():
+    adapter = TimesFM3Adapter(make_tiny_model())
+    context = torch.ones(1, 2, 16)
+    context_mask = torch.zeros_like(context, dtype=torch.bool)
+    context_mask[:, 0, 5] = True
+    padding_mask = torch.zeros(1, 16, dtype=torch.bool)
+    padding_mask[:, :2] = True
+    prepared = adapter._prepare_decode_inputs(
+        context,
+        horizon=6,
+        context_mask=context_mask,
+        context_padding_mask=padding_mask,
+    )
+    assert prepared["mask"].equal(padding_mask)
+    assert prepared["target_mask"][0, 0, 5]
+    assert not prepared["past_only_mask"][0, 0, 5]
+
+
 def test_adapter_enforces_total_variate_budget():
     adapter = TimesFM3Adapter(make_tiny_model())
     context = torch.zeros(1, 30, 16)
@@ -133,3 +174,25 @@ def test_lora_optimizer_groups_preserve_separate_learning_rates():
     groups = adapter.optimizer_parameter_groups(OptimizerConfig())
     rates = {group["group_name"]: group["lr"] for group in groups}
     assert rates == {"head": 3e-4, "adapter": 1e-4}
+
+
+def test_adapter_load_rejects_feature_order_mismatch(tmp_path):
+    backbone = make_tiny_model()
+    names = configure_tuning(backbone, mode="head", last_n_layers=1)
+    adapter = TimesFM3Adapter(
+        backbone,
+        checkpoint="tiny",
+        tuning_mode="head",
+        trainable_names=names,
+    )
+    adapter.save_adapter(
+        tmp_path,
+        metadata={"past_only_features": ["spread", "volume"]},
+    )
+    with pytest.raises(ValueError, match="past_only_features"):
+        adapter.load_adapter(
+            tmp_path / "adapter.pt",
+            expected_metadata={
+                "past_only_features": ["volume", "spread"],
+            },
+        )

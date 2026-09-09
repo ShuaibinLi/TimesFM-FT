@@ -38,11 +38,12 @@ def _rank(values: np.ndarray) -> np.ndarray:
 
 def summarize_samples(
     dataset: IntradayWindowDataset,
-) -> tuple[np.ndarray, np.ndarray, tuple[str, ...]]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, tuple[str, ...]]:
     """Converts variable-length contexts into a fixed, causal baseline matrix."""
 
     rows: list[np.ndarray] = []
     targets: list[np.ndarray] = []
+    target_masks: list[np.ndarray] = []
     names: tuple[str, ...] | None = None
     for index in range(len(dataset)):
         sample = dataset[index]
@@ -55,15 +56,25 @@ def summarize_samples(
         context_names = ("target_return", *dataset.past_only_features)
         for variate, name in enumerate(context_names):
             valid = context[variate, ~context_mask[variate]]
-            features.extend(
-                (
+            if len(valid):
+                statistics = (
                     float(valid[-1]),
                     float(valid.mean()),
                     float(valid.std()),
                     float(valid.sum()),
                 )
+            else:
+                statistics = (0.0, 0.0, 0.0, 0.0)
+            features.extend((*statistics, float(context_mask[variate].mean())))
+            feature_names.extend(
+                (
+                    f"{name}_last",
+                    f"{name}_mean",
+                    f"{name}_std",
+                    f"{name}_sum",
+                    f"{name}_missing_fraction",
+                )
             )
-            feature_names.extend((f"{name}_last", f"{name}_mean", f"{name}_std", f"{name}_sum"))
         context_length = sample["context_length"]
         for variate, name in enumerate(dataset.past_future_features):
             valid_context = known[variate, :context_length][~known_mask[variate, :context_length]]
@@ -88,6 +99,7 @@ def summarize_samples(
             raise ValueError(f"baseline row {index} contains non-finite values")
         rows.append(row)
         targets.append(sample["future_values"].numpy())
+        target_masks.append(sample["future_mask"].numpy())
         current_names = tuple(feature_names)
         if names is None:
             names = current_names
@@ -95,7 +107,7 @@ def summarize_samples(
             raise RuntimeError("baseline feature schema changed between samples")
     if names is None:
         raise ValueError("dataset contains no samples")
-    return np.stack(rows), np.stack(targets), names
+    return np.stack(rows), np.stack(targets), np.stack(target_masks), names
 
 
 def sample_ids(dataset: IntradayWindowDataset) -> np.ndarray:
@@ -117,19 +129,38 @@ class RidgeBaseline:
         self.coefficients: np.ndarray | None = None
         self.intercept: np.ndarray | None = None
 
-    def fit(self, features: np.ndarray, targets: np.ndarray) -> RidgeBaseline:
+    def fit(
+        self,
+        features: np.ndarray,
+        targets: np.ndarray,
+        target_mask: np.ndarray | None = None,
+    ) -> RidgeBaseline:
         self.mean = features.mean(axis=0, dtype=np.float64)
         self.scale = features.std(axis=0, dtype=np.float64)
         self.scale[self.scale == 0] = 1.0
         normalized = (features - self.mean) / self.scale
-        self.intercept = targets.mean(axis=0, dtype=np.float64)
-        centered_target = targets - self.intercept
-        gram = normalized.T @ normalized
-        regularizer = self.alpha * np.eye(gram.shape[0])
-        self.coefficients = np.linalg.solve(
-            gram + regularizer,
-            normalized.T @ centered_target,
+        mask = (
+            np.zeros_like(targets, dtype=np.bool_)
+            if target_mask is None
+            else np.asarray(target_mask, dtype=np.bool_)
         )
+        if mask.shape != targets.shape:
+            raise ValueError("target_mask must match targets")
+        self.intercept = np.empty(targets.shape[1], dtype=np.float64)
+        self.coefficients = np.empty((features.shape[1], targets.shape[1]), dtype=np.float64)
+        regularizer = self.alpha * np.eye(features.shape[1])
+        for horizon in range(targets.shape[1]):
+            valid = ~mask[:, horizon]
+            if not valid.any():
+                raise ValueError(f"no valid Ridge targets at horizon {horizon + 1}")
+            design = normalized[valid]
+            target = targets[valid, horizon]
+            self.intercept[horizon] = target.mean(dtype=np.float64)
+            centered = target - self.intercept[horizon]
+            self.coefficients[:, horizon] = np.linalg.solve(
+                design.T @ design + regularizer,
+                design.T @ centered,
+            )
         return self
 
     def predict(self, features: np.ndarray) -> np.ndarray:
@@ -162,6 +193,7 @@ class RidgeBaseline:
 def fit_predict_lightgbm(
     train_features: np.ndarray,
     train_targets: np.ndarray,
+    train_target_mask: np.ndarray,
     test_features: np.ndarray,
 ) -> tuple[np.ndarray, list[Any]]:
     try:
@@ -171,6 +203,9 @@ def fit_predict_lightgbm(
     predictions = np.empty((len(test_features), train_targets.shape[1]), dtype=np.float32)
     models: list[Any] = []
     for horizon in range(train_targets.shape[1]):
+        valid = ~train_target_mask[:, horizon]
+        if not valid.any():
+            raise ValueError(f"no valid LightGBM targets at horizon {horizon + 1}")
         model = LGBMRegressor(
             objective="regression_l1",
             n_estimators=300,
@@ -181,7 +216,7 @@ def fit_predict_lightgbm(
             random_state=42,
             n_jobs=-1,
         )
-        model.fit(train_features, train_targets[:, horizon])
+        model.fit(train_features[valid], train_targets[valid, horizon])
         predictions[:, horizon] = model.predict(test_features)
         models.append(model)
     return predictions, models
@@ -190,13 +225,15 @@ def fit_predict_lightgbm(
 def point_forecast_report(
     predictions: np.ndarray,
     targets: np.ndarray,
+    target_mask: np.ndarray,
     *,
     horizons: tuple[int, ...],
 ) -> list[dict[str, float | int | None]]:
     rows: list[dict[str, float | int | None]] = []
     for horizon in horizons:
-        prediction = predictions[:, :horizon].sum(axis=1)
-        target = targets[:, :horizon].sum(axis=1)
+        valid = ~target_mask[:, :horizon].any(axis=1)
+        prediction = predictions[valid, :horizon].sum(axis=1)
+        target = targets[valid, :horizon].sum(axis=1)
         error = prediction - target
         target_sse = float(np.dot(target, target))
         error_sse = float(np.dot(error, error))
@@ -205,8 +242,8 @@ def point_forecast_report(
             {
                 "horizon_minutes": horizon,
                 "samples": len(target),
-                "mae": float(np.mean(np.abs(error))),
-                "rmse": float(np.sqrt(np.mean(error**2))),
+                "mae": float(np.mean(np.abs(error))) if len(error) else None,
+                "rmse": float(np.sqrt(np.mean(error**2))) if len(error) else None,
                 "ic": _correlation(prediction, target),
                 "rank_ic": _correlation(_rank(prediction), _rank(target)),
                 "directional_accuracy": (
@@ -229,22 +266,32 @@ def run_baseline(
     horizons: tuple[int, ...],
     ridge_alpha: float = 1.0,
 ) -> Path:
-    train_x, train_y, feature_names = summarize_samples(train)
-    test_x, test_y, test_feature_names = summarize_samples(test)
+    train_x, train_y, train_mask, feature_names = summarize_samples(train)
+    test_x, test_y, test_mask, test_feature_names = summarize_samples(test)
     if feature_names != test_feature_names:
         raise ValueError("train/test baseline feature schemas differ")
     output_dir.mkdir(parents=True, exist_ok=True)
     if model_name == "ridge":
-        model = RidgeBaseline(alpha=ridge_alpha).fit(train_x, train_y)
+        model = RidgeBaseline(alpha=ridge_alpha).fit(train_x, train_y, train_mask)
         predictions = model.predict(test_x)
         model.save(output_dir / "ridge_model.npz", feature_names)
     else:
-        predictions, models = fit_predict_lightgbm(train_x, train_y, test_x)
+        predictions, models = fit_predict_lightgbm(
+            train_x,
+            train_y,
+            train_mask,
+            test_x,
+        )
         model_dir = output_dir / "lightgbm_models"
         model_dir.mkdir()
         for horizon, model in enumerate(models, start=1):
             model.booster_.save_model(str(model_dir / f"h{horizon:02d}.txt"))
-    report = point_forecast_report(predictions, test_y, horizons=horizons)
+    report = point_forecast_report(
+        predictions,
+        test_y,
+        test_mask,
+        horizons=horizons,
+    )
     (output_dir / "summary.json").write_text(
         json.dumps(
             {
@@ -262,6 +309,7 @@ def run_baseline(
         output_dir / "predictions.npz",
         predictions=predictions,
         targets=test_y,
+        target_mask=test_mask,
         sample_ids=sample_ids(test),
     )
     return output_dir

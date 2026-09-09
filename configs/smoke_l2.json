@@ -1,0 +1,14 @@
+{
+  "extends": "smoke_l1.json",
+  "objective": {
+    "name": "l2",
+    "auxiliary_weight": 0.05,
+    "auxiliary_features": [
+      "realized_vol_15m",
+      "market_return_1m"
+    ]
+  },
+  "trainer": {
+    "output_dir": "../outputs/smoke-l2"
+  }
+}

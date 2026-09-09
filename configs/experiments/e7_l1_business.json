@@ -1,0 +1,11 @@
+{
+  "extends": "e2_past_future.json",
+  "objective": {
+    "name": "l1",
+    "cumulative_huber_weight": 0.3,
+    "cumulative_horizons": [5, 15, 30, 60]
+  },
+  "trainer": {
+    "output_dir": "../../outputs/e7-l1-business"
+  }
+}
