@@ -16,16 +16,15 @@ does not preserve its data, config, metric, or checkpoint contracts.
 ## Active contract
 
 - frequency: exactly one minute
-- target: a frozen, source-provided `return_1m` series
+- target: trailing 1min WMid displacement in ZN ticks, derived on the frozen grid
 - context: 64 to 192 real intraday minutes by default
 - horizon: the next 64 individual one-minute returns
 - past-only inputs: selected causal market-state features
 - past-future inputs: known calendar values over context plus horizon
 - session rule: no sample crosses a trade-date/session boundary
 - model budget: target + all covariates must not exceed 32 variates
-- training routes: F0-final deployment control, F0-all dense shifted
-  forecasting, recommended F1 final-business extension, and optional F1-MV
-  auxiliary ablation
+- active training route: F0-final head-only control; LoRA/dense objectives
+  remain code-level follow-ups without active configs
 - split rule: chronological, whole-day train/validation/test partitions
 
 Context is dynamic. A sample with 83 real minutes is grouped into the 96-point
@@ -48,17 +47,15 @@ planned follow-up experiment.
 
 ```text
 configs/
-├── datasets/intraday_1min_schema.json # source columns and frozen target semantics
-├── experiments/                    # E0-E5 inputs + T0-T3 training routes
-├── smoke_t{0,1,2,3}_*.json
-└── splits/                         # chronological date lists
+├── datasets/zn_rank_selected100_1min.json
+├── experiments/                    # active ZN E0/E1/E2, pilot, August baselines
+└── splits/zn-rank-selected100/     # production dates + August test slice
 scripts/
 ├── prepare_intraday_splits.py
 ├── select_past_only_features.py
-├── make_synthetic_data.py
 ├── run_baseline.py
+├── prepare_rank_selected100_training.sh
 ├── run_train_nohup.sh
-├── run_training_route_matrix_nohup.sh
 └── run_zero_shot_matrix_nohup.sh
 src/timesfm_ft/
 ├── adapter.py       # differentiable official decode + both covariate classes
@@ -73,7 +70,7 @@ src/timesfm_ft/
 
 ## Freeze the production data definition first
 
-`configs/datasets/intraday_1min_schema.json` is the explicit boundary between the
+`configs/datasets/zn_rank_selected100_1min.json` is the explicit boundary between the
 model repository and an upstream one-minute Parquet dataset. Before producing
 real bundles:
 
@@ -84,12 +81,9 @@ features. The preparer trims it to 390 rows/day and derives the historical
 tick-unit `return_1m` target variate. The older 500 ms and TiltGate corpora
 remain separate and are not silently accepted by this route.
 
-1. replace `PRIMARY`, `frozen_source_unit`, and `frozen_source_price`;
-2. verify every source feature column and family;
-3. freeze whether timestamps denote bar start or bar end;
-4. verify `return_1m[t]` is available at decision time `t`;
-5. declare `availability_lag_minutes` for every past-only source column;
-6. version `dataset_id` whenever any of these facts changes.
+The active freeze is product ZN, target unit `ZN_ticks`, price source `WMid`,
+bar-end timestamps, and zero availability lag. Version `dataset_id` whenever
+any of these facts changes.
 
 The preparer normally consumes a frozen target column. A schema may instead
 declare the audited `trailing_price_difference_ticks` derivation for causal
@@ -106,21 +100,13 @@ Non-zero feature availability lags are applied before bundle creation, with the
 new leading unavailable rows masked rather than backfilled.
 Every source Parquet part is content-hashed; the manifest also records the
 combined source snapshot and preparer-script hash.
-Create new source-derived `configs/splits/dates-{train,val,test}.txt` files as
-described in `configs/splits/README.md`; the archived 500 ms lists are not
-active defaults.
+The frozen chronological date lists and their exclusion audit live under
+`configs/splits/zn-rank-selected100/`.
 
 Expected source layout defaults to:
 
 ```text
 <source-root>/date=YYYYMMDD/*.parquet
-```
-
-Build chronological bundles:
-
-```bash
-python scripts/prepare_intraday_splits.py \
-  --source-root gs://bucket/frozen-intraday-1min
 ```
 
 The active ZN selected100 route is reproducible end to end:
@@ -166,95 +152,54 @@ Feature selection is deliberately restricted to a bundle declaring
 
 ```bash
 python scripts/select_past_only_features.py \
-  --bundle data/intraday-1min/train \
-  --output outputs/feature-selection/train-only.json
+  --bundle data/zn-rank-selected100-1min/train \
+  --output outputs/feature-selection/zn-rank-selected100.json \
+  --limit 20 \
+  --max-missing-rate 0.05
 ```
 
 The selector ranks incremental candidates by training-period IC/rank IC,
 enforces family and correlation caps, and never opens validation/test bundles.
 
-## Experiments
+## Active experiment configs
 
-The checked-in matrix isolates one change at a time:
+`configs/experiments/_base.json` is an internal parent, not a runnable
+experiment. The runnable production matrix is:
 
-- E0: return only, context 64-192
-- E1: E0 plus 18 past-only features
-- E2: E1 plus TOD sine/cosine and time-to-close
-- E3: E2 with `C_max=128`
-- E4: E2 with `C_max=256`
-- E5: E2 with `C_min=96`
+- `zn_rank_e0_return_only.json`: historical `return_1m` only;
+- `zn_rank_e1_selected20.json`: target plus 20 train-only selected features;
+- `zn_rank_e2_selected20_tod.json`: E1 plus three deterministic time covariates;
+- `zn_rank_e2_pilot.json`: one-epoch E2 head-only training gate.
 
-The matched training-route matrix is separate:
+The frozen August 2025 zero-shot reports use:
 
-- T0 / F0-final: differentiable deployment suffix decode, final Pinball
-- T1 / F0-all: public low-level full-sequence forward, dense eligible Pinball
-- T2 / F1: T1 + `0.3 ×` final-anchor cumulative P50 Huber
-- T3 / F1-MV: T2 + `0.05 ×` selected dense past-only auxiliary Pinball
+- `zn_rank_e0_zero_shot_202508.json`;
+- `zn_rank_e1_zero_shot_202508.json`;
+- `zn_rank_e2_zero_shot_202508.json`.
 
-T1–T3 are explicitly labeled pretraining-like downstream engineering routes,
-not reconstructions of Google's unpublished recipe. They call the public
-inference-specialized Torch `forward()` with full causal sequences,
-`patch_cpm_mask=None`, explicit next-64 roll labels, and explicit eligible
-anchor masks. Linear detrending is disabled for all matched T0–T3 configs so
-the dense final token is numerically checked against deployment `decode()`.
-Validation business metrics and checkpoint selection always use deployment
-`decode()` predictions; dense final-token parity is rechecked on every
-validation batch.
-Random CPM, role reassignment, and sequence packing remain deferred research:
-the public Torch port does not expose the unpublished training branch needed
-to claim official parity.
-
-With stride-1 overlapping windows, one absolute dense origin may be supervised
-under several truncated-history views. This is intentional context
-augmentation, not extra independent data; every epoch logs eligible anchors,
-unique `(date,timestamp)` origins, and their repeat factor.
-
-Run a zero-shot experiment:
-
-```bash
-timesfm-eval \
-  --config configs/experiments/e2_past_future.json \
-  --split test
-```
-
-Run the complete zero-shot matrix under `nohup`:
+Run/reproduce the August zero-shot matrix:
 
 ```bash
 scripts/run_zero_shot_matrix_nohup.sh
 ```
 
-Only after the input ablations establish value should adaptation be run:
+Run the one-epoch training gate:
 
 ```bash
-scripts/run_train_nohup.sh configs/experiments/t0_f0_final.json
+scripts/run_train_nohup.sh configs/experiments/zn_rank_e2_pilot.json
 ```
 
-The default adaptation is head-only. Change `adapter.type` to `lora` only for a
-separate, matched experiment. The official TimesFM submodule remains unmodified.
-
-Run the gated T0 → T1 → T2 → T3 comparison under `nohup`:
+Only after the pilot improves validation mean-daily RankIC should the complete
+five-epoch config be launched:
 
 ```bash
-scripts/run_training_route_matrix_nohup.sh
+scripts/run_train_nohup.sh configs/experiments/zn_rank_e2_selected20_tod.json
 ```
 
-F1 cumulative scales at 5/15/30/60 minutes and F1-MV feature scales are fitted
-only from the declared training bundle. Their values, method, date-list hash,
-feature-schema/manifest hashes, valid counts, raw estimates, explicit fallback,
-and state fingerprint are written to `loss_scales.json` and embedded in every
-checkpoint. Past-future rows are structurally excluded from both
-`forward_unknown()` and `forward_dense()` objective outputs and never enter
-forecast supervision.
-
-F0 Pinball remains in the frozen target unit exactly as specified by v1.3,
-whereas F1/F1-MV add normalized components. Consequently `0.3` and `0.05` are
-unit-specific starting weights, not portable constants: changing ticks/bps/log
-units requires a new dataset ID and validation ablation.
-
-Production configs select checkpoints by the mean validation daily rank IC
-across 5/15/30/60 minutes, not by total loss. History and
-checkpoint metadata retain IC, rank IC, direction, prediction deciles,
-calibration, net utility, turnover, and drawdown for the final joint decision.
+The active objective is F0-final Pinball in ZN tick units. Checkpoints are
+selected by mean validation daily RankIC across 5/15/30/60 minutes, not total
+loss. LoRA, F0-all, F1, and F1-MV remain implemented research routes but have
+no active configs until the head-only input value is established.
 
 ## Required baselines
 
@@ -263,12 +208,12 @@ They receive causal fixed-length summaries of each dynamic context.
 
 ```bash
 python scripts/run_baseline.py \
-  --config configs/experiments/e2_past_future.json \
+  --config configs/experiments/zn_rank_e2_selected20_tod.json \
   --model ridge
 
 pip install -e '.[baselines]'
 python scripts/run_baseline.py \
-  --config configs/experiments/e2_past_future.json \
+  --config configs/experiments/zn_rank_e2_selected20_tod.json \
   --model lightgbm
 ```
 
@@ -286,6 +231,9 @@ Evaluation writes:
 - `predictions.npz`: targets, all quantiles, timestamps, dates, and context
   lengths when enabled.
 
+The frozen August 2025 zero-shot input-ablation report is
+[`zn_rank_zero_shot_baseline_202508_report.md`](zn_rank_zero_shot_baseline_202508_report.md).
+
 “Daily IC” here means time-series correlation across intraday decision windows,
 computed within each trade date and then averaged across dates. It is not a
 cross-sectional multi-instrument IC.
@@ -302,9 +250,8 @@ pytest
 ruff check src tests scripts
 
 python scripts/smoke_real_checkpoint.py \
-  --config configs/smoke_t0_final.json
-python scripts/smoke_real_checkpoint.py \
-  --config configs/smoke_t3_f1_mv.json --minimum-context 96
+  --config configs/experiments/zn_rank_e2_pilot.json \
+  --minimum-context 96
 ```
 
 The synthetic bundle checks dynamic context, past-only/past-future routing,

@@ -22,7 +22,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", default="configs/smoke.json")
+    parser.add_argument(
+        "--config",
+        default="configs/experiments/zn_rank_e2_pilot.json",
+    )
     parser.add_argument(
         "--checkpoint",
         default="../timesfm-3.0-pytorch",

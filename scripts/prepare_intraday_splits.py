@@ -491,7 +491,7 @@ def main() -> None:
     parser.add_argument(
         "--schema",
         type=Path,
-        default=REPO_ROOT / "configs/datasets/intraday_1min_schema.json",
+        default=REPO_ROOT / "configs/datasets/zn_rank_selected100_1min.json",
     )
     parser.add_argument("--source-root", required=True)
     parser.add_argument(

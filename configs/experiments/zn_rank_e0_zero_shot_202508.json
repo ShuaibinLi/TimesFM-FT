@@ -1,0 +1,10 @@
+{
+  "extends": "zn_rank_e0_return_only.json",
+  "data": {
+    "test_dates_path": "../splits/zn-rank-selected100/dates-test-202508.txt",
+    "test_path": "../../data/zn-rank-selected100-1min/test-202508"
+  },
+  "trainer": {
+    "output_dir": "../../outputs/zn-rank-e0-zero-shot-202508"
+  }
+}

@@ -12,97 +12,51 @@ from timesfm_ft.config import (
 )
 
 
-def test_e0_e5_input_matrix_matches_training_plan():
+def test_active_zn_input_matrix_and_pilot_are_matched():
     root = Path(__file__).resolve().parents[1] / "configs/experiments"
-    configs = {path.stem: ExperimentConfig.from_json(path) for path in root.glob("e*.json")}
-    assert set(configs) == {
-        "e0_return_only",
-        "e1_past_only",
-        "e2_past_future",
-        "e3_context_128",
-        "e4_context_256",
-        "e5_context_min_96",
-    }
+    names = (
+        "zn_rank_e0_return_only",
+        "zn_rank_e1_selected20",
+        "zn_rank_e2_selected20_tod",
+        "zn_rank_e2_pilot",
+    )
+    configs = {name: ExperimentConfig.from_json(root / f"{name}.json") for name in names}
     for config in configs.values():
         assert config.data.frequency_minutes == 1
         assert config.data.horizon_length == 64
         assert config.data.stride == 1
+        assert config.data.dataset_id == "zn_rank_selected100_1min_wmid_ticks_v1"
+        assert config.data.target_price_source == "WMid"
+        assert config.data.target_unit == "ZN_ticks"
         assert config.trainer.checkpoint_metric == "mean_daily_rank_ic"
         assert config.trainer.checkpoint_horizons == (5, 15, 30, 60)
         assert config.model.disable_iterative_cpm_revin
         assert config.objective.name == "f0_final"
-    assert configs["e0_return_only"].data.past_only_features == ()
-    assert len(configs["e1_past_only"].data.past_only_features) == 18
-    assert len(configs["e2_past_future"].data.past_future_features) == 3
-    assert configs["e3_context_128"].data.context_max == 128
-    assert configs["e4_context_256"].data.context_max == 256
-    assert configs["e5_context_min_96"].data.context_min == 96
-
-
-def test_t0_t3_training_route_matrix_is_matched():
-    root = Path(__file__).resolve().parents[1] / "configs/experiments"
-    configs = {path.stem: ExperimentConfig.from_json(path) for path in root.glob("t*.json")}
-    assert set(configs) == {
-        "t0_f0_final",
-        "t1_f0_all",
-        "t2_f1",
-        "t3_f1_mv",
-    }
-    assert [configs[name].objective.name for name in sorted(configs)] == [
-        "f0_final",
-        "f0_all",
-        "f1",
-        "f1_mv",
-    ]
-    for config in configs.values():
-        assert config.model.disable_linear_detrending
-        assert config.data.horizon_length == 64
-        assert config.trainer.checkpoint_horizons == (5, 15, 30, 60)
-    assert configs["t2_f1"].objective.cumulative_huber_weight == 0.3
-    assert configs["t2_f1"].objective.cumulative_horizons == (
-        5,
-        15,
-        30,
-        60,
-    )
-    assert configs["t3_f1_mv"].objective.auxiliary_weight == 0.05
-    assert set(configs["t3_f1_mv"].objective.auxiliary_features) == {
-        "realized_vol_15m",
-        "spread",
-        "volume",
-    }
+    assert configs["zn_rank_e0_return_only"].data.past_only_features == ()
+    assert configs["zn_rank_e0_return_only"].data.past_future_features == ()
+    assert len(configs["zn_rank_e1_selected20"].data.past_only_features) == 20
+    assert configs["zn_rank_e1_selected20"].data.past_future_features == ()
+    assert len(configs["zn_rank_e2_selected20_tod"].data.past_future_features) == 3
+    assert configs["zn_rank_e2_pilot"].trainer.epochs == 1
 
 
 def test_relative_paths_resolve_from_leaf_config(tmp_path, monkeypatch):
     root = Path(__file__).resolve().parents[1]
     monkeypatch.chdir(tmp_path)
-    config = ExperimentConfig.from_json(root / "configs/experiments/e2_past_future.json")
-    assert Path(config.data.train_path) == root / "data/intraday-1min/train"
-    assert Path(config.data.train_dates_path) == root / "configs/splits/dates-train.txt"
-
-
-def test_smoke_configs_cover_all_loss_routes():
-    root = Path(__file__).resolve().parents[1] / "configs"
-    configs = [
-        ExperimentConfig.from_json(root / name)
-        for name in (
-            "smoke_t0_final.json",
-            "smoke_t1_f0_all.json",
-            "smoke_t2_f1.json",
-            "smoke_t3_f1_mv.json",
-        )
-    ]
-    assert [config.objective.name for config in configs] == [
-        "f0_final",
-        "f0_all",
-        "f1",
-        "f1_mv",
-    ]
-    assert configs[2].objective.cumulative_horizons == (5, 15, 30, 60)
-    assert configs[3].objective.auxiliary_features == (
-        "realized_vol_15m",
-        "market_return_1m",
+    config = ExperimentConfig.from_json(root / "configs/experiments/zn_rank_e2_selected20_tod.json")
+    assert Path(config.data.train_path) == root / "data/zn-rank-selected100-1min/train"
+    assert (
+        Path(config.data.train_dates_path)
+        == root / "configs/splits/zn-rank-selected100/dates-train.txt"
     )
+
+
+def test_august_zero_shot_configs_use_the_frozen_month_bundle():
+    root = Path(__file__).resolve().parents[1] / "configs/experiments"
+    for stage in ("e0", "e1", "e2"):
+        config = ExperimentConfig.from_json(root / f"zn_rank_{stage}_zero_shot_202508.json")
+        assert Path(config.data.test_path).name == "test-202508"
+        assert Path(config.data.test_dates_path).name == "dates-test-202508.txt"
 
 
 def test_variate_budget_and_role_overlap_fail_closed():

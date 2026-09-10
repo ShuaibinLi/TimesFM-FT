@@ -9,7 +9,7 @@ SCHEMA="$ROOT/configs/datasets/zn_rank_selected100_1min.json"
 SPLITS="$ROOT/configs/splits/zn-rank-selected100"
 BUNDLES="$ROOT/data/zn-rank-selected100-1min"
 SELECTION="$ROOT/outputs/feature-selection/zn-rank-selected100.json"
-EXPERIMENT="$ROOT/configs/experiments/zn_rank_selected_e2.json"
+EXPERIMENT="$ROOT/configs/experiments/zn_rank_e2_selected20_tod.json"
 
 if [[ -f "$DOWNLOAD_PID_FILE" ]]; then
   download_pid="$(cat "$DOWNLOAD_PID_FILE")"

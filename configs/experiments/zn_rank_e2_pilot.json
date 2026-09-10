@@ -1,5 +1,5 @@
 {
-  "extends": "zn_rank_selected_e2.json",
+  "extends": "zn_rank_e2_selected20_tod.json",
   "trainer": {
     "early_stopping_patience": 1,
     "epochs": 1,

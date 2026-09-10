@@ -9,7 +9,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SELECTION = REPO_ROOT / "outputs" / "feature-selection" / "zn-rank-selected100.json"
-DEFAULT_OUTPUT = REPO_ROOT / "configs" / "experiments" / "zn_rank_selected_e2.json"
+DEFAULT_OUTPUT = REPO_ROOT / "configs" / "experiments" / "zn_rank_e2_selected20_tod.json"
 
 
 def main() -> None:

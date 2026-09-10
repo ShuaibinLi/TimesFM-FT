@@ -1,9 +1,0 @@
-{
-  "extends": "t0_f0_final.json",
-  "objective": {
-    "name": "f0_all"
-  },
-  "trainer": {
-    "output_dir": "../../outputs/t1-f0-all"
-  }
-}
