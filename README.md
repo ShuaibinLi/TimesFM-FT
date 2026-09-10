@@ -170,7 +170,8 @@ experiment. The runnable production matrix is:
 - `zn_rank_e1_selected20.json`: target plus 20 train-only selected features;
 - `zn_rank_e2_selected20_tod.json`: E1 plus three deterministic time covariates;
 - `zn_rank_e2_pilot.json`: one-epoch E2 head-only control;
-- `zn_rank_e2_lora_pilot.json`: matched one-epoch last-4-layer LoRA route.
+- `zn_rank_e2_lora_pilot.json`: matched one-epoch last-4-layer LoRA route;
+- `zn_rank_e2_full_pilot.json`: matched one-epoch full-tuning stress test.
 
 The non-overlapping full-test zero-shot matrix uses:
 
@@ -190,6 +191,16 @@ Run the matched one-epoch training gates:
 scripts/run_train_nohup.sh configs/experiments/zn_rank_e2_pilot.json
 scripts/run_train_nohup.sh configs/experiments/zn_rank_e2_lora_pilot.json
 ```
+
+`scripts/run_e2_pilot_matrix_nohup.sh` runs head → LoRA → full sequentially.
+When head/LoRA are already in progress, use
+`scripts/run_e2_full_after_matrix_nohup.sh` to queue full tuning behind them.
+The full route uses micro-batch 4 × accumulation 16 to preserve effective
+batch 64 without assuming full-backbone activations fit at micro-batch 32.
+All pilots run full rolling-one-step validation and save a non-resumable
+adapter snapshot every 500 optimizer updates under
+`step-checkpoints/epoch-*/`; epoch-end `last/` and `best/` additionally contain
+the complete resumable optimizer/scheduler/RNG state.
 
 Only after a pilot improves validation rolling one-step overall IC should a complete
 five-epoch config be launched:
@@ -262,8 +273,8 @@ Build one P50 point per unique target minute and daily vectors:
 
 ```bash
 python scripts/build_daily_prediction_vectors.py \
-  --predictions outputs/zn-rank-e2-zero-shot-test/evaluation-test/predictions.npz \
-  --output-dir outputs/zn-rank-e2-zero-shot-test/evaluation-test/daily-series-lead1
+  --predictions outputs/zn-rank-zero-shot-test/e2/evaluation-test/predictions.npz \
+  --output-dir outputs/zn-rank-zero-shot-test/e2/evaluation-test/daily-series-lead1
 ```
 
 This writes `daily_vectors.npz`, long-form `daily_points.csv`, and
@@ -274,8 +285,8 @@ and then run:
 
 ```bash
 python scripts/build_daily_prediction_vectors.py \
-  --predictions outputs/zn-rank-e2-zero-shot-test/evaluation-h64/predictions.npz \
-  --output-dir outputs/zn-rank-e2-zero-shot-test/evaluation-h64/daily-series-block64 \
+  --predictions outputs/zn-rank-zero-shot-test/e2/evaluation-h64/predictions.npz \
+  --output-dir outputs/zn-rank-zero-shot-test/e2/evaluation-h64/daily-series-block64 \
   --mode blocks \
   --block-size 64
 ```

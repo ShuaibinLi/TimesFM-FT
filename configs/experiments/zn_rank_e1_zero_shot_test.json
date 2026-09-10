@@ -8,6 +8,6 @@
     "trading_horizon": 1
   },
   "trainer": {
-    "output_dir": "../../outputs/zn-rank-e1-zero-shot-test"
+    "output_dir": "../../outputs/zn-rank-zero-shot-test/e1"
   }
 }

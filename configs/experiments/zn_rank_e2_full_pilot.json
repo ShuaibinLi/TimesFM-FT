@@ -2,11 +2,13 @@
   "extends": "zn_rank_e2_selected20_tod.json",
   "adapter": {
     "dropout": 0.0,
-    "type": "lora"
+    "type": "full"
   },
   "trainer": {
+    "batch_size": 4,
     "early_stopping_patience": 1,
     "epochs": 1,
-    "output_dir": "../../outputs/zn-rank-e2-pilot-matrix/lora"
+    "gradient_accumulation_steps": 16,
+    "output_dir": "../../outputs/zn-rank-e2-pilot-matrix/full"
   }
 }

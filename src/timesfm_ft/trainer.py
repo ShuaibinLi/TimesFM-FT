@@ -10,7 +10,7 @@ import math
 import os
 import random
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
@@ -313,6 +313,8 @@ def _run_epoch(
     epoch: int,
     split: str,
     log_every_steps: int,
+    step_eval_interval: int | None = None,
+    step_callback: Callable[[int], None] | None = None,
 ) -> dict[str, Any]:
     training = optimizer is not None
     model.train(training)
@@ -330,6 +332,8 @@ def _run_epoch(
     unique_dense_anchors: set[tuple[int, int]] = set()
     gradient_norm_total = 0.0
     optimizer_updates = 0
+    recent_loss_sum = 0.0
+    recent_sample_count = 0
     started_at = time.perf_counter()
     if training:
         optimizer.zero_grad(set_to_none=True)
@@ -430,6 +434,8 @@ def _run_epoch(
                 raise FloatingPointError(
                     f"non-finite {split} loss at epoch={epoch} step={step + 1}"
                 )
+            recent_loss_sum += float(losses.total.detach()) * len(business_targets)
+            recent_sample_count += len(business_targets)
             if accumulator is not None:
                 if loss_fn.objective.uses_dense_forward:
                     deployment_predictions = model.predict(
@@ -499,6 +505,12 @@ def _run_epoch(
                     optimizer.zero_grad(set_to_none=True)
                     if scheduler is not None:
                         scheduler.step()
+                    if (
+                        step_callback is not None
+                        and step_eval_interval is not None
+                        and optimizer_updates % step_eval_interval == 0
+                    ):
+                        step_callback(optimizer_updates)
 
             component_values = {
                 "return_pinball": losses.return_pinball,
@@ -530,13 +542,15 @@ def _run_epoch(
                 )
                 LOGGER.info(
                     "%s epoch=%d step=%d/%d batch_loss=%.6f "
-                    "running_loss=%.6f return_pinball=%.6f cumulative_huber=%.6f "
+                    "recent_loss=%.6f running_loss=%.6f "
+                    "return_pinball=%.6f cumulative_huber=%.6f "
                     "auxiliary_pinball=%.6f context_width=%d gradient_norm=%s %s",
                     split,
                     epoch,
                     step + 1,
                     len(loader),
                     float(losses.total.detach()),
+                    recent_loss_sum / max(recent_sample_count, 1),
                     running_total,
                     running["return_pinball"],
                     running["cumulative_huber"],
@@ -549,6 +563,8 @@ def _run_epoch(
                     ),
                     lr_text,
                 )
+                recent_loss_sum = 0.0
+                recent_sample_count = 0
 
     elapsed = time.perf_counter() - started_at
     components = {
@@ -715,12 +731,13 @@ def _dataset(
     split: str,
     dates_path: str | None,
     for_training: bool = False,
+    horizon_length: int | None = None,
 ) -> IntradayWindowDataset:
     return IntradayWindowDataset(
         path,
         context_min=config.data.context_min,
         context_max=config.data.context_max,
-        horizon_length=config.data.horizon_length,
+        horizon_length=horizon_length or config.data.horizon_length,
         stride=config.data.stride,
         past_only_features=config.data.past_only_features,
         past_future_features=config.data.past_future_features,
@@ -762,6 +779,13 @@ def train_experiment(config: ExperimentConfig) -> Path:
         split="val",
         dates_path=config.data.val_dates_path,
         for_training=True,
+    )
+    checkpoint_val_data = _dataset(
+        config,
+        path=config.data.val_path,
+        split="val",
+        dates_path=config.data.val_dates_path,
+        horizon_length=1,
     )
     if train_data.num_variates != val_data.num_variates:
         raise ValueError("train and validation variate counts differ")
@@ -808,6 +832,21 @@ def train_experiment(config: ExperimentConfig) -> Path:
         num_workers=config.trainer.num_workers,
         pin_memory=device.type == "cuda",
         generator=None,
+    )
+    checkpoint_val_loader = _make_loader(
+        checkpoint_val_data,
+        batch_size=config.trainer.batch_size,
+        patch_length=patch_length,
+        shuffle=False,
+        num_workers=config.trainer.num_workers,
+        pin_memory=device.type == "cuda",
+        generator=None,
+    )
+    checkpoint_evaluation = EvaluationConfig(
+        report_horizons=(1,),
+        trading_horizon=1,
+        cost_per_turnover=config.evaluation.cost_per_turnover,
+        save_predictions=False,
     )
 
     loss_scales = fit_loss_scales(
@@ -922,6 +961,72 @@ def train_experiment(config: ExperimentConfig) -> Path:
         raise ValueError("resume epoch exceeds configured epochs")
 
     for epoch in range(start_epoch, config.trainer.epochs + 1):
+
+        def evaluate_and_save_step(
+            optimizer_step: int,
+            current_epoch: int = epoch,
+        ) -> None:
+            LOGGER.info(
+                "step_eval_start epoch=%d optimizer_step=%d",
+                current_epoch,
+                optimizer_step,
+            )
+            step_metrics = _run_epoch(
+                model,
+                checkpoint_val_loader,
+                loss_fn,
+                device=device,
+                horizon=1,
+                context_min=config.data.context_min,
+                evaluation=checkpoint_evaluation,
+                auxiliary_indices=auxiliary_indices,
+                optimizer=None,
+                scheduler=None,
+                gradient_accumulation_steps=1,
+                max_grad_norm=config.trainer.max_grad_norm,
+                epoch=current_epoch,
+                split="val-step",
+                log_every_steps=config.trainer.log_every_steps,
+            )
+            step_value, step_mode = _checkpoint_value(
+                step_metrics,
+                metric=config.trainer.checkpoint_metric,
+                horizons=config.trainer.checkpoint_horizons,
+            )
+            destination = (
+                output_dir
+                / "step-checkpoints"
+                / f"epoch-{current_epoch:03d}-optimizer-step-{optimizer_step:06d}"
+            )
+            metadata = {
+                "num_variates": train_data.num_variates,
+                "context_min": config.data.context_min,
+                "context_max": config.data.context_max,
+                "horizon_length": config.data.horizon_length,
+                "past_only_features": config.data.past_only_features,
+                "past_future_features": config.data.past_future_features,
+                "checkpoint_metric": config.trainer.checkpoint_metric,
+                "checkpoint_horizons": config.trainer.checkpoint_horizons,
+                "checkpoint_mode": step_mode,
+                "metric": step_value,
+                "epoch": current_epoch,
+                "optimizer_step": optimizer_step,
+                "resumable": False,
+                "validation_scorecard": step_metrics,
+            }
+            model.save_adapter(destination, metadata=metadata)
+            with (destination / "metrics.json").open("w", encoding="utf-8") as handle:
+                json.dump(step_metrics, handle, indent=2, sort_keys=True, allow_nan=False)
+            LOGGER.info(
+                "step_eval_end epoch=%d optimizer_step=%d %s=%.6f artifacts=%s",
+                current_epoch,
+                optimizer_step,
+                config.trainer.checkpoint_metric,
+                step_value,
+                destination,
+            )
+            model.train(True)
+
         train_metrics = _run_epoch(
             model,
             train_loader,
@@ -938,6 +1043,10 @@ def train_experiment(config: ExperimentConfig) -> Path:
             epoch=epoch,
             split="train",
             log_every_steps=config.trainer.log_every_steps,
+            step_eval_interval=config.trainer.step_eval_interval,
+            step_callback=(
+                evaluate_and_save_step if config.trainer.step_eval_interval is not None else None
+            ),
         )
         val_metrics = _run_epoch(
             model,
@@ -956,8 +1065,25 @@ def train_experiment(config: ExperimentConfig) -> Path:
             split="val",
             log_every_steps=config.trainer.log_every_steps,
         )
+        checkpoint_val_metrics = _run_epoch(
+            model,
+            checkpoint_val_loader,
+            loss_fn,
+            device=device,
+            horizon=1,
+            context_min=config.data.context_min,
+            evaluation=checkpoint_evaluation,
+            auxiliary_indices=auxiliary_indices,
+            optimizer=None,
+            scheduler=None,
+            gradient_accumulation_steps=1,
+            max_grad_norm=config.trainer.max_grad_norm,
+            epoch=epoch,
+            split="val",
+            log_every_steps=config.trainer.log_every_steps,
+        )
         selected_metric, selected_mode = _checkpoint_value(
-            val_metrics,
+            checkpoint_val_metrics,
             metric=config.trainer.checkpoint_metric,
             horizons=config.trainer.checkpoint_horizons,
         )
@@ -978,6 +1104,7 @@ def train_experiment(config: ExperimentConfig) -> Path:
             "learning_rates": _learning_rates(optimizer),
             "train": train_metrics,
             "val": val_metrics,
+            "checkpoint_val": checkpoint_val_metrics,
             "checkpoint": {
                 "metric": config.trainer.checkpoint_metric,
                 "horizons": config.trainer.checkpoint_horizons,
@@ -992,7 +1119,7 @@ def train_experiment(config: ExperimentConfig) -> Path:
         _write_history(output_dir / "history.jsonl", history)
         checkpoint_rows = [
             row
-            for row in val_metrics["cumulative_horizons"]
+            for row in checkpoint_val_metrics["cumulative_horizons"]
             if row["horizon_minutes"] in config.trainer.checkpoint_horizons
         ]
         rank_values = [
@@ -1042,16 +1169,16 @@ def train_experiment(config: ExperimentConfig) -> Path:
             loss_scales=loss_scales,
         )
         validation_scorecard = {
-            "loss": val_metrics["loss"],
-            "return_pinball": val_metrics["return_pinball"],
-            "cumulative_huber": val_metrics["cumulative_huber"],
-            "auxiliary_pinball": val_metrics["auxiliary_pinball"],
-            "cumulative_horizons": val_metrics["cumulative_horizons"],
-            "mean_absolute_coverage_error": val_metrics["mean_absolute_coverage_error"],
-            "q10_q90_coverage": val_metrics["q10_q90_coverage"],
-            "mean_q10_q90_width": val_metrics["mean_q10_q90_width"],
-            "quantile_crossing_rate": val_metrics["quantile_crossing_rate"],
-            "trading_proxy": val_metrics["trading_proxy"],
+            "loss": checkpoint_val_metrics["loss"],
+            "return_pinball": checkpoint_val_metrics["return_pinball"],
+            "cumulative_huber": checkpoint_val_metrics["cumulative_huber"],
+            "auxiliary_pinball": checkpoint_val_metrics["auxiliary_pinball"],
+            "cumulative_horizons": checkpoint_val_metrics["cumulative_horizons"],
+            "mean_absolute_coverage_error": checkpoint_val_metrics["mean_absolute_coverage_error"],
+            "q10_q90_coverage": checkpoint_val_metrics["q10_q90_coverage"],
+            "mean_q10_q90_width": checkpoint_val_metrics["mean_q10_q90_width"],
+            "quantile_crossing_rate": checkpoint_val_metrics["quantile_crossing_rate"],
+            "trading_proxy": checkpoint_val_metrics["trading_proxy"],
         }
         checkpoint_metadata = {
             "num_variates": train_data.num_variates,

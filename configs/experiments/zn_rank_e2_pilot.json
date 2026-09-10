@@ -3,6 +3,6 @@
   "trainer": {
     "early_stopping_patience": 1,
     "epochs": 1,
-    "output_dir": "../../outputs/zn-rank-e2-pilot"
+    "output_dir": "../../outputs/zn-rank-e2-pilot-matrix/head"
   }
 }

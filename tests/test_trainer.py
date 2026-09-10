@@ -128,6 +128,7 @@ def test_gradient_accumulation_steps_partial_final_group():
     model = _TinyForecast()
     loader = [_batch(), _batch(), _batch(1)]
     optimizer = _CountingSgd(model.parameters())
+    evaluated_steps: list[int] = []
     metrics = trainer._run_epoch(
         model,
         loader,
@@ -158,8 +159,11 @@ def test_gradient_accumulation_steps_partial_final_group():
         epoch=1,
         split="train",
         log_every_steps=10,
+        step_eval_interval=2,
+        step_callback=evaluated_steps.append,
     )
     assert optimizer.step_count == 2
+    assert evaluated_steps == [2]
     assert np.isfinite(metrics["mean_pinball"])
 
 

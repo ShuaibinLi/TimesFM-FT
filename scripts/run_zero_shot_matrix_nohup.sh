@@ -3,9 +3,9 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONFIGS=(
-  zn_rank_e0_zero_shot_test
-  zn_rank_e1_zero_shot_test
-  zn_rank_e2_zero_shot_test
+  e0:zn_rank_e0_zero_shot_test
+  e1:zn_rank_e1_zero_shot_test
+  e2:zn_rank_e2_zero_shot_test
 )
 
 RUN_DIR="$REPO_ROOT/outputs/zn-rank-zero-shot-test-matrix"
@@ -14,9 +14,11 @@ PID_FILE="$RUN_DIR/matrix.pid"
 mkdir -p "$RUN_DIR"
 
 if [[ "${1:-}" == "--worker" ]]; then
-  for name in "${CONFIGS[@]}"; do
+  for entry in "${CONFIGS[@]}"; do
+    stage="${entry%%:*}"
+    name="${entry#*:}"
     config="$REPO_ROOT/configs/experiments/$name.json"
-    output="$RUN_DIR/$name"
+    output="$RUN_DIR/$stage/evaluation-test"
     printf '[%s] start %s\n' "$(date --iso-8601=seconds)" "$name"
     conda run --no-capture-output -n timesfm-ft \
       timesfm-eval --config "$config" --split test --output-dir "$output"

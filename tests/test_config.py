@@ -20,6 +20,7 @@ def test_active_zn_input_matrix_and_pilot_are_matched():
         "zn_rank_e2_selected20_tod",
         "zn_rank_e2_pilot",
         "zn_rank_e2_lora_pilot",
+        "zn_rank_e2_full_pilot",
     )
     configs = {name: ExperimentConfig.from_json(root / f"{name}.json") for name in names}
     for config in configs.values():
@@ -31,6 +32,7 @@ def test_active_zn_input_matrix_and_pilot_are_matched():
         assert config.data.target_unit == "ZN_ticks"
         assert config.trainer.checkpoint_metric == "ic"
         assert config.trainer.checkpoint_horizons == (1,)
+        assert config.trainer.step_eval_interval == 500
         assert config.model.disable_iterative_cpm_revin
         assert config.objective.name == "f0_final"
     assert configs["zn_rank_e0_return_only"].data.past_only_features == ()
@@ -42,6 +44,9 @@ def test_active_zn_input_matrix_and_pilot_are_matched():
     assert configs["zn_rank_e2_lora_pilot"].trainer.epochs == 1
     assert configs["zn_rank_e2_lora_pilot"].adapter.type == "lora"
     assert configs["zn_rank_e2_lora_pilot"].adapter.dropout == 0.0
+    assert configs["zn_rank_e2_full_pilot"].adapter.type == "full"
+    assert configs["zn_rank_e2_full_pilot"].trainer.batch_size == 4
+    assert configs["zn_rank_e2_full_pilot"].trainer.gradient_accumulation_steps == 16
 
 
 def test_relative_paths_resolve_from_leaf_config(tmp_path, monkeypatch):

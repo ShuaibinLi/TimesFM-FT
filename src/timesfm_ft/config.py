@@ -102,6 +102,7 @@ class TrainerConfig:
     num_workers: int = 4
     gradient_accumulation_steps: int = 1
     log_every_steps: int = 10
+    step_eval_interval: int | None = None
     seed: int = 42
     device: str = "auto"
     dtype: Literal["float32", "bfloat16"] = "bfloat16"
@@ -378,6 +379,8 @@ class ExperimentConfig:
             raise ValueError("trainer counts must be positive")
         if trainer.max_grad_norm <= 0 or trainer.num_workers < 0:
             raise ValueError("invalid max_grad_norm/num_workers")
+        if trainer.step_eval_interval is not None and trainer.step_eval_interval <= 0:
+            raise ValueError("step_eval_interval must be positive or null")
         if trainer.early_stopping_patience is not None and trainer.early_stopping_patience <= 0:
             raise ValueError("early_stopping_patience must be positive or null")
         if (

@@ -75,6 +75,7 @@
     "num_workers": 4,
     "gradient_accumulation_steps": 2,
     "log_every_steps": 10,
+    "step_eval_interval": 500,
     "seed": 42,
     "device": "auto",
     "dtype": "bfloat16",
