@@ -110,6 +110,8 @@ class TrainerConfig:
     checkpoint_metric: Literal[
         "mean_pinball",
         "rmse",
+        "ic",
+        "rank_ic",
         "mean_daily_rank_ic",
         "net_utility",
     ] = "mean_daily_rank_ic"
@@ -398,9 +400,12 @@ class ExperimentConfig:
             raise ValueError("trading_horizon must be within the forecast horizon")
         if evaluation.cost_per_turnover < 0:
             raise ValueError("cost_per_turnover must be non-negative")
-        if trainer.checkpoint_metric in {"mean_daily_rank_ic", "net_utility"} and not set(
-            trainer.checkpoint_horizons
-        ).issubset(evaluation.report_horizons):
+        if trainer.checkpoint_metric in {
+            "ic",
+            "rank_ic",
+            "mean_daily_rank_ic",
+            "net_utility",
+        } and not set(trainer.checkpoint_horizons).issubset(evaluation.report_horizons):
             raise ValueError("business checkpoint_horizons must be in evaluation.report_horizons")
         if trainer.checkpoint_metric == "net_utility" and trainer.checkpoint_horizons != (
             evaluation.trading_horizon,

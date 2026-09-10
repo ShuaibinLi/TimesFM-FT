@@ -118,14 +118,14 @@ scripts/prepare_rank_selected100_training.sh
 ```
 
 Its raw dump contains 100 candidate past-only columns plus `wmid`. The
-preparer derives tick-unit `return_1m` as the target history, builds
-chronological 70/15/15 bundles, and the train-only selector reduces the 100
-candidates to 20. With three deterministic time covariates, the resulting
-TimesFM input has 24 variates and remains under the hard limit of 32.
-The split builder retains all 813 raw files but excludes 10 holiday/half-day
-sessions that do not provide the frozen 390-minute model grid. Feature
-selection also rejects candidates above 5% training missingness before IC and
-correlation screening.
+preparer derives tick-unit `return_1m` as the target history, applies the
+fixed-boundary 476/209/128 train/validation/test date lists, and the train-only
+selector reduces the 100 candidates to 20. With three deterministic time
+covariates, the resulting TimesFM input has 24 variates and remains under the
+hard limit of 32. Event days are retained for training and later reported as
+evaluation slices; holiday/half-day sessions retain shorter session lengths.
+Feature selection rejects candidates above 5% training missingness before IC
+and correlation screening.
 
 Each split is stored once in session-major mmap arrays:
 
@@ -197,9 +197,10 @@ scripts/run_train_nohup.sh configs/experiments/zn_rank_e2_selected20_tod.json
 ```
 
 The active objective is F0-final Pinball in ZN tick units. Checkpoints are
-selected by mean validation daily RankIC across 5/15/30/60 minutes, not total
-loss. LoRA, F0-all, F1, and F1-MV remain implemented research routes but have
-no active configs until the head-only input value is established.
+selected by the pooled validation IC of the non-overlapping rolling one-step
+series (`lead=1`, P50), not total loss. Other leads and daily IC/RankIC remain
+diagnostics. LoRA, F0-all, F1, and F1-MV remain implemented research routes
+but have no active configs until the head-only input value is established.
 
 ## Required baselines
 
@@ -230,6 +231,27 @@ Evaluation writes:
 - `slices.csv`: context-length, session-phase, and volatility slices;
 - `predictions.npz`: targets, all quantiles, timestamps, dates, and context
   lengths when enabled.
+
+For `predictions.npz`, `N` is the number of forecast origins:
+
+```text
+predictions       float32[N, 64, 9]
+targets           float32[N, 64]
+target_mask       bool[N, 64]
+quantiles         float64[9]          # [0.1, ..., 0.9]
+last_returns      float32[N]
+context_lengths   int16[N]
+dates             int32[N]
+timestamps        int64[N]
+minute_indices    int16[N]
+context_volatility float32[N]
+```
+
+`predictions[i, j, k]` is quantile `k` for the individual 1min return at
+lead `j+1`, not a cumulative return and not a price. The 64 axis is future
+minutes; the 9 axis is Q10 through Q90. `targets[i, j]` is the matching
+realized return. Historical contexts are not duplicated into this artifact;
+only the last realized return and context metadata are retained.
 
 The frozen August 2025 zero-shot input-ablation report is
 [`zn_rank_zero_shot_baseline_202508_report.md`](zn_rank_zero_shot_baseline_202508_report.md).

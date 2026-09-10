@@ -197,12 +197,12 @@ def _derive_trailing_tick_return(
     expected_timestamp: np.ndarray,
     tick_size: float,
     interval_minutes: int,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     interval_ns = interval_minutes * 60 * 1_000_000_000
     if raw_timestamp.ndim != 1 or price.shape != raw_timestamp.shape:
         raise ValueError("raw timestamp and price must be aligned one-dimensional arrays")
-    if len(raw_timestamp) < len(expected_timestamp) + 1:
-        raise ValueError("derived return requires at least one pre-session warmup row")
+    if len(raw_timestamp) < 2:
+        raise ValueError("derived return requires a pre-session warmup row")
     if np.any(raw_timestamp[1:] <= raw_timestamp[:-1]):
         raise ValueError("raw target timestamps must be strictly increasing")
     bar_end = ((raw_timestamp + interval_ns - 1) // interval_ns) * interval_ns
@@ -211,10 +211,13 @@ def _derive_trailing_tick_return(
     if np.any(bar_end[1:] <= bar_end[:-1]):
         raise ValueError("derived bar-end timestamps must be unique and increasing")
 
-    positions = np.searchsorted(bar_end, expected_timestamp)
+    model_timestamp = expected_timestamp[expected_timestamp <= bar_end[-1]]
+    if not len(model_timestamp):
+        raise ValueError("raw rows end before the first model minute")
+    positions = np.searchsorted(bar_end, model_timestamp)
     if np.any(positions >= len(bar_end)) or not np.array_equal(
         bar_end[positions],
-        expected_timestamp,
+        model_timestamp,
     ):
         raise ValueError("raw rows do not cover the frozen model-minute grid")
     if np.any(positions == 0):
@@ -222,7 +225,7 @@ def _derive_trailing_tick_return(
 
     trailing_return = np.full(len(price), np.nan, dtype=np.float64)
     trailing_return[1:] = (price[1:] - price[:-1]) / tick_size
-    return trailing_return[positions], positions
+    return trailing_return[positions], positions, model_timestamp
 
 
 def _open_memmaps(
@@ -313,6 +316,13 @@ def build_split(
         past_only=len(past_columns),
         past_future=len(schema["past_future_features"]),
     )
+    arrays["target_values"][:] = 0.0
+    arrays["target_mask"][:] = True
+    arrays["past_only_values"][:] = 0.0
+    arrays["past_only_mask"][:] = True
+    arrays["past_future_values"][:] = 0.0
+    arrays["past_future_mask"][:] = True
+    arrays["timestamps"][:] = 0
     fs, source_path = fsspec.core.url_to_fs(source_root.rstrip("/"))
     known_rows = [
         _derived_known_feature(entry["kind"], minutes) for entry in schema["past_future_features"]
@@ -323,6 +333,7 @@ def build_split(
         else np.empty((0, minutes), dtype=np.float32)
     )
     target_missing_by_day: dict[str, int] = {}
+    session_lengths_by_day: dict[str, int] = {}
     feature_missing_counts = np.zeros(len(past_columns), dtype=np.int64)
     source_files: list[dict[str, Any]] = []
 
@@ -360,25 +371,26 @@ def build_split(
                 ],
                 dtype=np.float64,
             )
-            target_values, row_indices = _derive_trailing_tick_return(
+            target_values, row_indices, timestamp = _derive_trailing_tick_return(
                 raw_timestamp=raw_timestamp,
                 price=price,
                 expected_timestamp=expected,
                 tick_size=float(target_derivation["tick_size"]),
                 interval_minutes=int(target_derivation["interval_minutes"]),
             )
-            timestamp = expected
             target = np.asarray(target_values, dtype=np.float32)
+        session_length = len(timestamp)
         target_mask = ~np.isfinite(target)
+        session_lengths_by_day[str(date_value)] = session_length
         target_missing_by_day[str(date_value)] = int(target_mask.sum())
-        arrays["target_values"][index] = np.nan_to_num(
+        arrays["target_values"][index, :session_length] = np.nan_to_num(
             target,
             copy=False,
             nan=0.0,
             posinf=0.0,
             neginf=0.0,
         )
-        arrays["target_mask"][index] = target_mask
+        arrays["target_mask"][index, :session_length] = target_mask
         for feature_index, column in enumerate(past_columns):
             values = np.asarray(
                 table.column(column).to_numpy(zero_copy_only=False)[order][row_indices],
@@ -386,28 +398,31 @@ def build_split(
             )
             source_mask = ~np.isfinite(values)
             lag = past_lags[feature_index]
-            shifted = np.zeros(minutes, dtype=np.float32)
-            mask = np.ones(minutes, dtype=np.bool_)
+            shifted = np.zeros(session_length, dtype=np.float32)
+            mask = np.ones(session_length, dtype=np.bool_)
             if lag == 0:
                 shifted[:] = values
                 mask[:] = source_mask
-            elif lag < minutes:
+            elif lag < session_length:
                 shifted[lag:] = values[:-lag]
                 mask[lag:] = source_mask[:-lag]
-            arrays["past_only_values"][index, feature_index] = np.nan_to_num(
+            arrays["past_only_values"][index, feature_index, :session_length] = np.nan_to_num(
                 shifted,
                 copy=False,
                 nan=0.0,
                 posinf=0.0,
                 neginf=0.0,
             )
-            arrays["past_only_mask"][index, feature_index] = mask
+            arrays["past_only_mask"][index, feature_index, :session_length] = mask
             feature_missing_counts[feature_index] += int(mask.sum())
-        arrays["past_future_values"][index] = known_features
-        arrays["past_future_mask"][index] = False
-        arrays["timestamps"][index] = timestamp
+        arrays["past_future_values"][index, :, :session_length] = known_features[
+            :,
+            :session_length,
+        ]
+        arrays["past_future_mask"][index, :, :session_length] = False
+        arrays["timestamps"][index, :session_length] = timestamp
         arrays["dates"][index] = date_value
-        arrays["session_lengths"][index] = minutes
+        arrays["session_lengths"][index] = session_length
         if (index + 1) % 25 == 0 or index + 1 == len(dates):
             LOGGER.info("split=%s prepared=%d/%d", split, index + 1, len(dates))
 
@@ -452,6 +467,7 @@ def build_split(
         "data_quality": {
             "target_missing_total": sum(target_missing_by_day.values()),
             "target_missing_by_day": target_missing_by_day,
+            "session_lengths_by_day": session_lengths_by_day,
             "past_only_missing_total": {
                 name: int(feature_missing_counts[index])
                 for index, name in enumerate(

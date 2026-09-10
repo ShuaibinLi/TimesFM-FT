@@ -11,9 +11,13 @@ zn-rank-selected100/
 └── manifest.json
 ```
 
-The production train/validation/test lists contain 562/120/121 chronological,
-disjoint full sessions. Ten holiday/half-day raw partitions remain archived
-but are excluded because they do not provide the frozen 390-minute grid.
+The production train/validation/test lists contain 476/209/128 chronological,
+disjoint sessions with fixed boundaries 2022-11-01–2024-09-30,
+2024-10-01–2025-07-31, and 2025-08-01–2026-01-30. No FOMC, minutes,
+tariff-week, or other event days are removed. Holiday/half-day sessions remain
+in their calendar split with their shorter audited `session_length`; windows
+never cross their actual close. Event days should be evaluated as slices,
+not silently excluded from training.
 `dates-test-202508.txt` is the 21-day August baseline slice and must not be
 used for feature selection.
 

@@ -1,81 +1,30 @@
 {
-  "data_root": "/home/shuaibin.li/projects/timesfm_ft/datas/zn_rank_selected100_1min_20221101_20260130",
-  "eligible_full_session_dates": 803,
-  "excluded_dates": [
-    {
-      "date": 20241224,
-      "raw_rows": 230,
-      "reason": "non_full_session"
-    },
-    {
-      "date": 20250120,
-      "raw_rows": 215,
-      "reason": "non_full_session"
-    },
-    {
-      "date": 20250217,
-      "raw_rows": 215,
-      "reason": "non_full_session"
-    },
-    {
-      "date": 20250526,
-      "raw_rows": 215,
-      "reason": "non_full_session"
-    },
-    {
-      "date": 20250619,
-      "raw_rows": 215,
-      "reason": "non_full_session"
-    },
-    {
-      "date": 20250704,
-      "raw_rows": 215,
-      "reason": "non_full_session"
-    },
-    {
-      "date": 20250901,
-      "raw_rows": 215,
-      "reason": "non_full_session"
-    },
-    {
-      "date": 20251127,
-      "raw_rows": 215,
-      "reason": "non_full_session"
-    },
-    {
-      "date": 20251224,
-      "raw_rows": 230,
-      "reason": "non_full_session"
-    },
-    {
-      "date": 20260119,
-      "raw_rows": 215,
-      "reason": "non_full_session"
-    }
-  ],
-  "policy": "chronological_by_trading_date",
-  "required_raw_rows": 395,
+  "excluded_dates": [],
+  "policy": "fixed_date_boundaries_without_event_day_exclusions",
   "source": "/home/shuaibin.li/projects/timesfm_ft/spine/configs/wmp_500ms_dates_20221101_20260130.txt",
   "source_dates": 813,
   "source_sha256": "c3e4a046b0facc276077f87c09ea3b86987680bfc518597d3ddd45bfc80f3e48",
   "splits": {
     "test": {
-      "dates": 121,
-      "first": 20250806,
+      "boundary_end": 20260130,
+      "boundary_start": 20250801,
+      "dates": 128,
+      "first": 20250801,
       "last": 20260130
     },
     "train": {
-      "dates": 562,
+      "boundary_end": 20240930,
+      "boundary_start": 20221101,
+      "dates": 476,
       "first": 20221101,
-      "last": 20250207
+      "last": 20240930
     },
     "val": {
-      "dates": 120,
-      "first": 20250210,
-      "last": 20250805
+      "boundary_end": 20250731,
+      "boundary_start": 20241001,
+      "dates": 209,
+      "first": 20241001,
+      "last": 20250731
     }
-  },
-  "test_fraction": 0.15000000000000005,
-  "train_fraction": 0.7,
-  "val_fraction": 0.15
+  }
 }

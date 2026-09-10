@@ -213,10 +213,10 @@ def test_business_checkpoint_metrics_are_maximized():
         "mean_pinball": 1.0,
         "rmse": 2.0,
         "cumulative_horizons": [
-            {"horizon_minutes": 5, "mean_daily_rank_ic": 0.1},
-            {"horizon_minutes": 15, "mean_daily_rank_ic": 0.2},
-            {"horizon_minutes": 30, "mean_daily_rank_ic": 0.3},
-            {"horizon_minutes": 60, "mean_daily_rank_ic": 0.4},
+            {"horizon_minutes": 5, "ic": 0.5, "rank_ic": 0.4, "mean_daily_rank_ic": 0.1},
+            {"horizon_minutes": 15, "ic": 0.4, "rank_ic": 0.3, "mean_daily_rank_ic": 0.2},
+            {"horizon_minutes": 30, "ic": 0.3, "rank_ic": 0.2, "mean_daily_rank_ic": 0.3},
+            {"horizon_minutes": 60, "ic": 0.2, "rank_ic": 0.1, "mean_daily_rank_ic": 0.4},
         ],
         "trading_proxy": {"net_mean": 0.03},
     }
@@ -228,6 +228,18 @@ def test_business_checkpoint_metrics_are_maximized():
         0.25,
         "max",
     )
+    assert trainer._checkpoint_value(
+        metrics,
+        metric="ic",
+        horizons=(5, 15, 30, 60),
+    ) == (0.35, "max")
+    rank_value, rank_mode = trainer._checkpoint_value(
+        metrics,
+        metric="rank_ic",
+        horizons=(5, 15, 30, 60),
+    )
+    assert rank_value == pytest.approx(0.25)
+    assert rank_mode == "max"
     assert trainer._checkpoint_value(metrics, metric="net_utility", horizons=(60,)) == (0.03, "max")
     assert trainer._checkpoint_value(metrics, metric="mean_pinball", horizons=(60,)) == (1.0, "min")
 

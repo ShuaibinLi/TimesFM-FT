@@ -235,6 +235,22 @@ def test_prepare_derives_trailing_tick_return_from_causal_wmid_grid(tmp_path):
     assert manifest["target"]["derivation"]["kind"] == "trailing_price_difference_ticks"
 
 
+def test_trailing_return_derivation_keeps_contiguous_early_close_prefix():
+    minute_ns = 60 * 1_000_000_000
+    boundaries = np.arange(1, 5, dtype=np.int64) * minute_ns
+    expected = np.arange(2, 6, dtype=np.int64) * minute_ns
+    values, positions, timestamps = prepare._derive_trailing_tick_return(
+        raw_timestamp=boundaries - 1,
+        price=100.0 + np.arange(4) * 0.015625,
+        expected_timestamp=expected,
+        tick_size=0.015625,
+        interval_minutes=1,
+    )
+    np.testing.assert_allclose(values, np.ones(3))
+    np.testing.assert_array_equal(positions, np.asarray([1, 2, 3]))
+    np.testing.assert_array_equal(timestamps, expected[:3])
+
+
 def test_split_audit_rejects_overlap(tmp_path):
     (tmp_path / "dates-train.txt").write_text("20250102\n20250103\n")
     (tmp_path / "dates-val.txt").write_text("20250103\n20250104\n")

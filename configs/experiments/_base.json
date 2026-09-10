@@ -80,8 +80,8 @@
     "dtype": "bfloat16",
     "deterministic": true,
     "early_stopping_patience": 2,
-    "checkpoint_metric": "mean_daily_rank_ic",
-    "checkpoint_horizons": [5, 15, 30, 60]
+    "checkpoint_metric": "ic",
+    "checkpoint_horizons": [1]
   },
   "evaluation": {
     "report_horizons": [1, 5, 10, 15, 20, 30, 60],

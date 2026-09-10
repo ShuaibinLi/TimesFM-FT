@@ -28,8 +28,8 @@ def test_active_zn_input_matrix_and_pilot_are_matched():
         assert config.data.dataset_id == "zn_rank_selected100_1min_wmid_ticks_v1"
         assert config.data.target_price_source == "WMid"
         assert config.data.target_unit == "ZN_ticks"
-        assert config.trainer.checkpoint_metric == "mean_daily_rank_ic"
-        assert config.trainer.checkpoint_horizons == (5, 15, 30, 60)
+        assert config.trainer.checkpoint_metric == "ic"
+        assert config.trainer.checkpoint_horizons == (1,)
         assert config.model.disable_iterative_cpm_revin
         assert config.objective.name == "f0_final"
     assert configs["zn_rank_e0_return_only"].data.past_only_features == ()
@@ -57,6 +57,27 @@ def test_august_zero_shot_configs_use_the_frozen_month_bundle():
         config = ExperimentConfig.from_json(root / f"zn_rank_{stage}_zero_shot_202508.json")
         assert Path(config.data.test_path).name == "test-202508"
         assert Path(config.data.test_dates_path).name == "dates-test-202508.txt"
+        assert config.data.horizon_length == 1
+        assert config.evaluation.report_horizons == (1,)
+
+
+def test_owner_frozen_split_counts_and_boundaries():
+    root = Path(__file__).resolve().parents[1] / "configs/splits/zn-rank-selected100"
+    expected = {
+        "train": (476, 20221101, 20240930),
+        "val": (209, 20241001, 20250731),
+        "test": (128, 20250801, 20260130),
+    }
+    splits = {}
+    for name, (count, first, last) in expected.items():
+        values = tuple(
+            int(line) for line in (root / f"dates-{name}.txt").read_text().splitlines() if line
+        )
+        assert (len(values), values[0], values[-1]) == (count, first, last)
+        splits[name] = set(values)
+    assert not splits["train"] & splits["val"]
+    assert not splits["train"] & splits["test"]
+    assert not splits["val"] & splits["test"]
 
 
 def test_variate_budget_and_role_overlap_fail_closed():

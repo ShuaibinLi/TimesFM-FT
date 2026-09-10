@@ -277,11 +277,11 @@ def _checkpoint_value(
     if metric in {"mean_pinball", "rmse"}:
         value = metrics.get(metric)
         mode = "min"
-    elif metric == "mean_daily_rank_ic":
+    elif metric in {"ic", "rank_ic", "mean_daily_rank_ic"}:
         rows = {
             int(item["horizon_minutes"]): item for item in metrics.get("cumulative_horizons", ())
         }
-        values = [rows.get(horizon, {}).get("mean_daily_rank_ic") for horizon in horizons]
+        values = [rows.get(horizon, {}).get(metric) for horizon in horizons]
         value = (
             float(np.mean(values)) if values and all(item is not None for item in values) else None
         )

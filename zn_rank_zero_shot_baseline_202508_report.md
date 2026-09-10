@@ -261,8 +261,10 @@ mean-daily RankIC 先在每个交易日内部计算 RankIC，再跨日平均，�
 真实日内选时业务。E2 的 pooled 30/60min RankIC 为正，而 mean-daily
 显著为负，说明模型主要捕获了跨日尺度差异，却不能稳定完成日内排序。
 
-当前 checkpoint metric 已配置为 mean-daily RankIC，因此后续训练不会
-被正的 pooled RankIC 误导。
+当前业务选择以无重叠的一步 daily series pooled IC 为主，因此
+checkpoint metric 使用 `lead=1, q50` 与下一分钟 target 拼接后的 overall
+IC。其它 leads、cumulative horizons 和 mean-daily IC/RankIC 继续保留为
+诊断，不作为主 checkpoint 排序指标。
 
 ## 7. E0/E1/E2 在 60min 的对比
 
