@@ -48,8 +48,8 @@ planned follow-up experiment.
 ```text
 configs/
 ├── datasets/zn_rank_selected100_1min.json
-├── experiments/                    # active ZN E0/E1/E2, pilot, August baselines
-└── splits/zn-rank-selected100/     # production dates + August test slice
+├── experiments/                    # active ZN E0/E1/E2, pilot, full-test baselines
+└── splits/zn-rank-selected100/     # fixed-boundary production dates
 scripts/
 ├── prepare_intraday_splits.py
 ├── select_past_only_features.py
@@ -171,13 +171,13 @@ experiment. The runnable production matrix is:
 - `zn_rank_e2_selected20_tod.json`: E1 plus three deterministic time covariates;
 - `zn_rank_e2_pilot.json`: one-epoch E2 head-only training gate.
 
-The frozen August 2025 zero-shot reports use:
+The non-overlapping full-test zero-shot matrix uses:
 
-- `zn_rank_e0_zero_shot_202508.json`;
-- `zn_rank_e1_zero_shot_202508.json`;
-- `zn_rank_e2_zero_shot_202508.json`.
+- `zn_rank_e0_zero_shot_test.json`;
+- `zn_rank_e1_zero_shot_test.json`;
+- `zn_rank_e2_zero_shot_test.json`.
 
-Run/reproduce the August zero-shot matrix:
+Run/reproduce the full-test zero-shot matrix:
 
 ```bash
 scripts/run_zero_shot_matrix_nohup.sh
@@ -235,9 +235,9 @@ Evaluation writes:
 For `predictions.npz`, `N` is the number of forecast origins:
 
 ```text
-predictions       float32[N, 64, 9]
-targets           float32[N, 64]
-target_mask       bool[N, 64]
+predictions       float32[N, H, 9]
+targets           float32[N, H]
+target_mask       bool[N, H]
 quantiles         float64[9]          # [0.1, ..., 0.9]
 last_returns      float32[N]
 context_lengths   int16[N]
@@ -248,13 +248,22 @@ context_volatility float32[N]
 ```
 
 `predictions[i, j, k]` is quantile `k` for the individual 1min return at
-lead `j+1`, not a cumulative return and not a price. The 64 axis is future
-minutes; the 9 axis is Q10 through Q90. `targets[i, j]` is the matching
-realized return. Historical contexts are not duplicated into this artifact;
-only the last realized return and context metadata are retained.
+lead `j+1`, not a cumulative return and not a price. Training uses `H=64`;
+the non-overlapping full-test overall-IC baseline uses `H=1`. The 9 axis is Q10
+through Q90. `targets[i, j]` is the matching realized return. Historical
+contexts are not duplicated into this artifact; only the last realized return
+and context metadata are retained.
 
-The frozen August 2025 zero-shot input-ablation report is
-[`zn_rank_zero_shot_baseline_202508_report.md`](zn_rank_zero_shot_baseline_202508_report.md).
+Build one P50 point per unique target minute and daily vectors:
+
+```bash
+python scripts/build_daily_prediction_vectors.py \
+  --predictions outputs/zn-rank-e2-zero-shot-test/evaluation-test/predictions.npz \
+  --output-dir outputs/zn-rank-e2-zero-shot-test/evaluation-test/daily-series-lead1
+```
+
+This writes `daily_vectors.npz`, long-form `daily_points.csv`, and
+`summary.json` with the flattened non-overlapping `overall_ic`.
 
 “Daily IC” here means time-series correlation across intraday decision windows,
 computed within each trade date and then averaged across dates. It is not a

@@ -3,12 +3,12 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONFIGS=(
-  zn_rank_e0_zero_shot_202508
-  zn_rank_e1_zero_shot_202508
-  zn_rank_e2_zero_shot_202508
+  zn_rank_e0_zero_shot_test
+  zn_rank_e1_zero_shot_test
+  zn_rank_e2_zero_shot_test
 )
 
-RUN_DIR="$REPO_ROOT/outputs/zn-rank-zero-shot-202508-matrix"
+RUN_DIR="$REPO_ROOT/outputs/zn-rank-zero-shot-test-matrix"
 LOG_FILE="$RUN_DIR/matrix.log"
 PID_FILE="$RUN_DIR/matrix.pid"
 mkdir -p "$RUN_DIR"

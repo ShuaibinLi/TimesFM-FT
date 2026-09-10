@@ -51,12 +51,12 @@ def test_relative_paths_resolve_from_leaf_config(tmp_path, monkeypatch):
     )
 
 
-def test_august_zero_shot_configs_use_the_frozen_month_bundle():
+def test_zero_shot_configs_use_the_full_test_bundle_and_one_step_horizon():
     root = Path(__file__).resolve().parents[1] / "configs/experiments"
     for stage in ("e0", "e1", "e2"):
-        config = ExperimentConfig.from_json(root / f"zn_rank_{stage}_zero_shot_202508.json")
-        assert Path(config.data.test_path).name == "test-202508"
-        assert Path(config.data.test_dates_path).name == "dates-test-202508.txt"
+        config = ExperimentConfig.from_json(root / f"zn_rank_{stage}_zero_shot_test.json")
+        assert Path(config.data.test_path).name == "test"
+        assert Path(config.data.test_dates_path).name == "dates-test.txt"
         assert config.data.horizon_length == 1
         assert config.evaluation.report_horizons == (1,)
 

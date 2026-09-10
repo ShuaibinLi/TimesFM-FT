@@ -1,0 +1,13 @@
+{
+  "extends": "zn_rank_e2_selected20_tod.json",
+  "data": {
+    "horizon_length": 1
+  },
+  "evaluation": {
+    "report_horizons": [1],
+    "trading_horizon": 1
+  },
+  "trainer": {
+    "output_dir": "../../outputs/zn-rank-e2-zero-shot-test"
+  }
+}

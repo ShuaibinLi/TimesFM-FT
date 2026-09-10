@@ -7,7 +7,6 @@ zn-rank-selected100/
 ├── dates-train.txt
 ├── dates-val.txt
 ├── dates-test.txt
-├── dates-test-202508.txt
 └── manifest.json
 ```
 
@@ -18,8 +17,6 @@ tariff-week, or other event days are removed. Holiday/half-day sessions remain
 in their calendar split with their shorter audited `session_length`; windows
 never cross their actual close. Event days should be evaluated as slices,
 not silently excluded from training.
-`dates-test-202508.txt` is the 21-day August baseline slice and must not be
-used for feature selection.
 
 Regenerate the split manifest with
 `python scripts/build_rank_selected100_splits.py`. Bundles hash the exact date

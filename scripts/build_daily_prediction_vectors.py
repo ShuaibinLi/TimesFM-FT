@@ -173,9 +173,7 @@ def build_daily_vectors(
         },
         "overall_ic": _pearson(point_prediction, point_target),
         "overall_rank_ic": _rank_ic(point_prediction, point_target),
-        "mean_daily_ic": float(
-            np.mean([row["ic"] for row in daily_rows if row["ic"] is not None])
-        ),
+        "mean_daily_ic": float(np.mean([row["ic"] for row in daily_rows if row["ic"] is not None])),
         "mean_daily_rank_ic": float(
             np.mean([row["rank_ic"] for row in daily_rows if row["rank_ic"] is not None])
         ),
