@@ -85,6 +85,7 @@ def select_features(
     correlation_limit: float,
     family_limit: int,
     max_missing_rate: float,
+    score_metric: str = "ic",
 ) -> None:
     values, masks, labels, manifest = _load_training_rows(
         bundle,
@@ -98,20 +99,29 @@ def select_features(
     for index, name in enumerate(names):
         valid = ~masks[:, index] & np.isfinite(values[:, index])
         horizon_metrics = {}
-        scores: list[float] = []
+        score_candidates: list[tuple[int, float]] = []
         for horizon_index, horizon in enumerate(horizons):
             ic = _pearson(values[valid, index], labels[valid, horizon_index])
             rank_ic = _rank_ic(values[valid, index], labels[valid, horizon_index])
             horizon_metrics[str(horizon)] = {"ic": ic, "rank_ic": rank_ic}
-            if rank_ic is not None:
-                scores.append(abs(rank_ic))
+            selected_metric = ic if score_metric == "ic" else rank_ic
+            if selected_metric is not None:
+                score_candidates.append((horizon, selected_metric))
+        best_horizon, signed_score = max(
+            score_candidates,
+            key=lambda item: abs(item[1]),
+            default=(0, 0.0),
+        )
         reports.append(
             {
                 "name": name,
                 "family": families.get(name, "unknown"),
                 "valid_rows": int(valid.sum()),
                 "missing_rate": float(1.0 - valid.mean()),
-                "score": max(scores, default=0.0),
+                "score": abs(signed_score),
+                "signed_score": signed_score,
+                "score_metric": score_metric,
+                "score_horizon": best_horizon,
                 "horizons": horizon_metrics,
                 "index": index,
             }
@@ -159,6 +169,7 @@ def select_features(
         "correlation_limit": correlation_limit,
         "family_limit": family_limit,
         "max_missing_rate": max_missing_rate,
+        "score_metric": score_metric,
         "selected_features": [row["name"] for row in selected],
         "selected_detail": selected,
         "all_features": reports,
@@ -172,12 +183,13 @@ def main() -> None:
     parser.add_argument("--bundle", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--context-min", type=int, default=64)
-    parser.add_argument("--horizons", type=int, nargs="+", default=(5, 15, 30, 60))
+    parser.add_argument("--horizons", type=int, nargs="+", default=(1,))
     parser.add_argument("--stride", type=int, default=1)
     parser.add_argument("--limit", type=int, default=20)
     parser.add_argument("--correlation-limit", type=float, default=0.9)
     parser.add_argument("--family-limit", type=int, default=4)
     parser.add_argument("--max-missing-rate", type=float, default=0.05)
+    parser.add_argument("--score-metric", choices=("ic", "rank_ic"), default="ic")
     args = parser.parse_args()
     if not 0 < args.correlation_limit <= 1:
         parser.error("--correlation-limit must be in (0, 1]")
@@ -195,6 +207,7 @@ def main() -> None:
         correlation_limit=args.correlation_limit,
         family_limit=args.family_limit,
         max_missing_rate=args.max_missing_rate,
+        score_metric=args.score_metric,
     )
 
 

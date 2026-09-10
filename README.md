@@ -265,6 +265,20 @@ python scripts/build_daily_prediction_vectors.py \
 This writes `daily_vectors.npz`, long-form `daily_points.csv`, and
 `summary.json` with the flattened non-overlapping `overall_ic`.
 
+For non-overlapping 64-minute block stitching, first evaluate the H=64 config
+and then run:
+
+```bash
+python scripts/build_daily_prediction_vectors.py \
+  --predictions outputs/zn-rank-e2-zero-shot-test/evaluation-h64/predictions.npz \
+  --output-dir outputs/zn-rank-e2-zero-shot-test/evaluation-h64/daily-series-block64 \
+  --mode blocks \
+  --block-size 64
+```
+
+The current full-test result is documented in
+[`zn_rank_zero_shot_test_report.md`](zn_rank_zero_shot_test_report.md).
+
 “Daily IC” here means time-series correlation across intraday decision windows,
 computed within each trade date and then averaged across dates. It is not a
 cross-sectional multi-instrument IC.

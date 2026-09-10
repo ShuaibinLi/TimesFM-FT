@@ -44,6 +44,8 @@ cd "$ROOT"
 "$PYTHON" scripts/select_past_only_features.py \
   --bundle "$BUNDLES/train" \
   --output "$SELECTION" \
+  --horizons 1 \
+  --score-metric ic \
   --limit 20 \
   --family-limit 4 \
   --correlation-limit 0.9 \
