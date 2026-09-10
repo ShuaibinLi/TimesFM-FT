@@ -197,6 +197,8 @@ When head/LoRA are already in progress, use
 `scripts/run_e2_full_after_matrix_nohup.sh` to queue full tuning behind them.
 The full route uses micro-batch 4 × accumulation 16 to preserve effective
 batch 64 without assuming full-backbone activations fit at micro-batch 32.
+Remote trial allow/deny state is frozen in `configs/remote_workers.json`;
+spark3 is currently disabled and must not receive TimesFM jobs.
 All pilots run full rolling-one-step validation and save a non-resumable
 adapter snapshot every 500 optimizer updates under
 `step-checkpoints/epoch-*/`; epoch-end `last/` and `best/` additionally contain

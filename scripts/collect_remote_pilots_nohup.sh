@@ -7,7 +7,6 @@ LOG_FILE="$GROUP/remote-collector.log"
 PID_FILE="$GROUP/remote-collector.pid"
 ENTRIES=(
   head:spark5.nyc01.vaticlabs.net
-  lora:spark3.nyc01.vaticlabs.net
   full:spark4.nyc01.vaticlabs.net
 )
 

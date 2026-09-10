@@ -1,0 +1,9 @@
+{
+  "disabled": {
+    "spark3.nyc01.vaticlabs.net": "Reserved by another user; do not schedule TimesFM jobs"
+  },
+  "enabled": [
+    "spark4.nyc01.vaticlabs.net",
+    "spark5.nyc01.vaticlabs.net"
+  ]
+}
