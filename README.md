@@ -77,10 +77,12 @@ src/timesfm_ft/
 model repository and an upstream one-minute Parquet dataset. Before producing
 real bundles:
 
-No matching production corpus is currently present in this workspace. The
-available WMP data is a 500 ms, roughly 405-minute Treasury session, while the
-992-column TiltGate corpus is irregular event/cell data. Neither is silently
-resampled or accepted as the plan's neutral 390×1min source.
+The active production-like research corpus is
+`../datas/zn_rank_selected100_1min_20221101_20260130`: a causal
+`LastEventAtClockTrigger` minute snapshot with `wmid` and 100 ZN-only candidate
+features. The preparer trims it to 390 rows/day and derives the historical
+tick-unit `return_1m` target variate. The older 500 ms and TiltGate corpora
+remain separate and are not silently accepted by this route.
 
 1. replace `PRIMARY`, `frozen_source_unit`, and `frozen_source_price`;
 2. verify every source feature column and family;
@@ -134,6 +136,10 @@ preparer derives tick-unit `return_1m` as the target history, builds
 chronological 70/15/15 bundles, and the train-only selector reduces the 100
 candidates to 20. With three deterministic time covariates, the resulting
 TimesFM input has 24 variates and remains under the hard limit of 32.
+The split builder retains all 813 raw files but excludes 10 holiday/half-day
+sessions that do not provide the frozen 390-minute model grid. Feature
+selection also rejects candidates above 5% training missingness before IC and
+correlation screening.
 
 Each split is stored once in session-major mmap arrays:
 

@@ -12,9 +12,7 @@ import pyarrow.parquet as pq
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SOURCE = REPO_ROOT.parent / "spine" / "configs" / "wmp_500ms_dates_20221101_20260130.txt"
-DEFAULT_DATA_ROOT = (
-    REPO_ROOT.parent / "datas" / "zn_rank_selected100_1min_20221101_20260130"
-)
+DEFAULT_DATA_ROOT = REPO_ROOT.parent / "datas" / "zn_rank_selected100_1min_20221101_20260130"
 DEFAULT_OUTPUT = REPO_ROOT / "configs" / "splits" / "zn-rank-selected100"
 
 

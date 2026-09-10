@@ -21,12 +21,12 @@
       "zn_JointSignedNotional_All_GlobalEventN64_CumMin",
       "zn_vnmom_5s",
       "zn_rega_deelogqtypre_n40",
-      "zn_rega_flidurrat_n10",
       "zn__imp_t6_003__bidside__emsE_41",
       "zn_rega_deelogordpre_n20",
       "zn__imp_t11_014__signed__emsT_300s",
       "zn__imp_t11_007__up__win_60s",
-      "zn__imp_t3_003__signed__win_60s"
+      "zn__imp_t3_003__signed__win_60s",
+      "zn__imp_t14_001__down__win_300s"
     ],
     "product": "ZN",
     "target_availability_lag_minutes": 0,

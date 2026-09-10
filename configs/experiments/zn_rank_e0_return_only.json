@@ -1,0 +1,10 @@
+{
+  "extends": "zn_rank_selected_e2.json",
+  "data": {
+    "past_only_features": [],
+    "past_future_features": []
+  },
+  "trainer": {
+    "output_dir": "../../outputs/zn-rank-e0-return-only"
+  }
+}
