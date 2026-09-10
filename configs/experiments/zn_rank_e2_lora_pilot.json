@@ -1,0 +1,12 @@
+{
+  "extends": "zn_rank_e2_selected20_tod.json",
+  "adapter": {
+    "dropout": 0.0,
+    "type": "lora"
+  },
+  "trainer": {
+    "early_stopping_patience": 1,
+    "epochs": 1,
+    "output_dir": "../../outputs/zn-rank-e2-lora-pilot"
+  }
+}

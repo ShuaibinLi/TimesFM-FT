@@ -9,8 +9,7 @@
 - Points: 41,023 unique `(date, target_timestamp)` minutes.
 - Full day: 326 points after the minimum 64-minute context.
 - Short day: 146 or 161 points.
-- Overall IC: Pearson correlation after chronologically concatenating all
-  daily prediction/target vectors.
+- Overall IC: Pearson correlation after chronologically concatenating all daily prediction/target vectors.
 
 ## Results
 
@@ -28,6 +27,17 @@ directional accuracy       50.00%              49.97%              49.95%
 Q10–Q90 coverage           81.62%              79.13%              79.30%
 Q10–Q90 width               1.1811             1.0407              1.0459
 ```
+
+按交易日 block bootstrap（5,000 次）的 overall IC 95% 区间：
+
+```text
+E0 rolling   [-0.0250, 0.0675]
+E1 rolling   [-0.0196, 0.0246]
+E2 rolling   [-0.0207, 0.0248]
+E2 block64   [-0.0124, 0.0131]
+```
+
+全部区间都包含 0，当前结果只能视为弱信号或无显著信号。
 
 ## Interpretation
 

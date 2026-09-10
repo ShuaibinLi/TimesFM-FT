@@ -19,6 +19,7 @@ def test_active_zn_input_matrix_and_pilot_are_matched():
         "zn_rank_e1_selected20",
         "zn_rank_e2_selected20_tod",
         "zn_rank_e2_pilot",
+        "zn_rank_e2_lora_pilot",
     )
     configs = {name: ExperimentConfig.from_json(root / f"{name}.json") for name in names}
     for config in configs.values():
@@ -38,6 +39,9 @@ def test_active_zn_input_matrix_and_pilot_are_matched():
     assert configs["zn_rank_e1_selected20"].data.past_future_features == ()
     assert len(configs["zn_rank_e2_selected20_tod"].data.past_future_features) == 3
     assert configs["zn_rank_e2_pilot"].trainer.epochs == 1
+    assert configs["zn_rank_e2_lora_pilot"].trainer.epochs == 1
+    assert configs["zn_rank_e2_lora_pilot"].adapter.type == "lora"
+    assert configs["zn_rank_e2_lora_pilot"].adapter.dropout == 0.0
 
 
 def test_relative_paths_resolve_from_leaf_config(tmp_path, monkeypatch):

@@ -169,7 +169,8 @@ experiment. The runnable production matrix is:
 - `zn_rank_e0_return_only.json`: historical `return_1m` only;
 - `zn_rank_e1_selected20.json`: target plus 20 train-only selected features;
 - `zn_rank_e2_selected20_tod.json`: E1 plus three deterministic time covariates;
-- `zn_rank_e2_pilot.json`: one-epoch E2 head-only training gate.
+- `zn_rank_e2_pilot.json`: one-epoch E2 head-only control;
+- `zn_rank_e2_lora_pilot.json`: matched one-epoch last-4-layer LoRA route.
 
 The non-overlapping full-test zero-shot matrix uses:
 
@@ -183,13 +184,14 @@ Run/reproduce the full-test zero-shot matrix:
 scripts/run_zero_shot_matrix_nohup.sh
 ```
 
-Run the one-epoch training gate:
+Run the matched one-epoch training gates:
 
 ```bash
 scripts/run_train_nohup.sh configs/experiments/zn_rank_e2_pilot.json
+scripts/run_train_nohup.sh configs/experiments/zn_rank_e2_lora_pilot.json
 ```
 
-Only after the pilot improves validation mean-daily RankIC should the complete
+Only after a pilot improves validation rolling one-step overall IC should a complete
 five-epoch config be launched:
 
 ```bash
@@ -199,8 +201,10 @@ scripts/run_train_nohup.sh configs/experiments/zn_rank_e2_selected20_tod.json
 The active objective is F0-final Pinball in ZN tick units. Checkpoints are
 selected by the pooled validation IC of the non-overlapping rolling one-step
 series (`lead=1`, P50), not total loss. Other leads and daily IC/RankIC remain
-diagnostics. LoRA, F0-all, F1, and F1-MV remain implemented research routes
-but have no active configs until the head-only input value is established.
+diagnostics. Adapter dropout is fixed at zero; the released PyTorch backbone
+contains no `torch.nn.Dropout` modules, so this setting only affects injected
+LoRA paths. F0-all, F1, and F1-MV remain code-level research routes without
+active configs.
 
 ## Required baselines
 
