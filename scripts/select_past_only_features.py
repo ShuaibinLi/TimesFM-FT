@@ -84,6 +84,7 @@ def select_features(
     limit: int,
     correlation_limit: float,
     family_limit: int,
+    max_missing_rate: float,
 ) -> None:
     values, masks, labels, manifest = _load_training_rows(
         bundle,
@@ -119,6 +120,8 @@ def select_features(
     selected: list[dict] = []
     family_counts: dict[str, int] = {}
     for candidate in sorted(reports, key=lambda row: (-row["score"], row["name"])):
+        if candidate["missing_rate"] > max_missing_rate:
+            continue
         family = candidate["family"]
         if family_counts.get(family, 0) >= family_limit:
             continue
@@ -155,6 +158,7 @@ def select_features(
         "stride": stride,
         "correlation_limit": correlation_limit,
         "family_limit": family_limit,
+        "max_missing_rate": max_missing_rate,
         "selected_features": [row["name"] for row in selected],
         "selected_detail": selected,
         "all_features": reports,
@@ -173,9 +177,12 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=20)
     parser.add_argument("--correlation-limit", type=float, default=0.9)
     parser.add_argument("--family-limit", type=int, default=4)
+    parser.add_argument("--max-missing-rate", type=float, default=0.05)
     args = parser.parse_args()
     if not 0 < args.correlation_limit <= 1:
         parser.error("--correlation-limit must be in (0, 1]")
+    if not 0 <= args.max_missing_rate < 1:
+        parser.error("--max-missing-rate must be in [0, 1)")
     if min(args.context_min, args.stride, args.limit, args.family_limit) <= 0:
         parser.error("count arguments must be positive")
     select_features(
@@ -187,6 +194,7 @@ def main() -> None:
         limit=args.limit,
         correlation_limit=args.correlation_limit,
         family_limit=args.family_limit,
+        max_missing_rate=args.max_missing_rate,
     )
 
 

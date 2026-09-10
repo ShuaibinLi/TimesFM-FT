@@ -1,0 +1,50 @@
+{
+  "data": {
+    "dataset_id": "zn_rank_selected100_1min_wmid_ticks_v1",
+    "past_future_features": [
+      "sin_time_of_day",
+      "cos_time_of_day",
+      "time_to_close"
+    ],
+    "past_only_features": [
+      "zn__imp_t19_002__bidside__emsT_300s",
+      "zn_sdi2",
+      "zn__imp_t21_001__up__emsT_60s",
+      "zn_rega_deemedlevqty_n40",
+      "zn__imp_t7_001__bidside__emsT_15s",
+      "zn_sweep1_pivotdirvol_2s",
+      "zn_deep_kyletv_s300_d95_lam",
+      "zn_CancelSignedQueueFrac_Touch_GlobalEventN64_Imb",
+      "zn_pivotdeltasize",
+      "zn__imp_t3_004__signed__win_300s",
+      "zn__imp_t18_002__signed__win_300s",
+      "zn_JointSignedNotional_All_GlobalEventN64_CumMin",
+      "zn_vnmom_5s",
+      "zn_rega_deelogqtypre_n40",
+      "zn_rega_flidurrat_n10",
+      "zn__imp_t6_003__bidside__emsE_41",
+      "zn_rega_deelogordpre_n20",
+      "zn__imp_t11_014__signed__emsT_300s",
+      "zn__imp_t11_007__up__win_60s",
+      "zn__imp_t3_003__signed__win_60s"
+    ],
+    "product": "ZN",
+    "target_availability_lag_minutes": 0,
+    "target_missing_policy": "mask",
+    "target_name": "return_1m",
+    "target_price_source": "WMid",
+    "target_return_type": "tick_displacement",
+    "target_timestamp_semantics": "bar_end",
+    "target_unit": "ZN_ticks",
+    "test_dates_path": "../splits/zn-rank-selected100/dates-test.txt",
+    "test_path": "../../data/zn-rank-selected100-1min/test",
+    "train_dates_path": "../splits/zn-rank-selected100/dates-train.txt",
+    "train_path": "../../data/zn-rank-selected100-1min/train",
+    "val_dates_path": "../splits/zn-rank-selected100/dates-val.txt",
+    "val_path": "../../data/zn-rank-selected100-1min/val"
+  },
+  "extends": "_base.json",
+  "trainer": {
+    "output_dir": "../../outputs/zn-rank-selected100-e2"
+  }
+}

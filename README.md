@@ -89,10 +89,14 @@ resampled or accepted as the plan's neutral 390×1min source.
 5. declare `availability_lag_minutes` for every past-only source column;
 6. version `dataset_id` whenever any of these facts changes.
 
-The preparer deliberately does not recompute the target. It rejects duplicate,
-non-minute, or non-390-row sessions. Missing/halted target minutes are stored as
-finite fill values with `target_mask=True`; invalid cutoffs are skipped and all
-affected loss terms receive zero weight.
+The preparer normally consumes a frozen target column. A schema may instead
+declare the audited `trailing_price_difference_ticks` derivation for causal
+clock-sampled raw data: it maps pre-boundary `hwts` to exact bar ends and
+computes the realized target from `wmid[t] - wmid[t-1]` using a frozen tick
+size. It rejects duplicate, non-minute, or non-390-row sessions.
+Missing/halted target minutes are stored as finite fill values with
+`target_mask=True`; invalid cutoffs are skipped and all affected loss terms
+receive zero weight.
 The active v1.3 slicer deliberately accepts only `bar_end` with zero target
 availability lag; other semantics fail closed until their decision-time
 alignment is specified and tested.
@@ -116,6 +120,20 @@ Build chronological bundles:
 python scripts/prepare_intraday_splits.py \
   --source-root gs://bucket/frozen-intraday-1min
 ```
+
+The active ZN selected100 route is reproducible end to end:
+
+```bash
+python scripts/build_rank_selected100_schema.py
+python scripts/build_rank_selected100_splits.py
+scripts/prepare_rank_selected100_training.sh
+```
+
+Its raw dump contains 100 candidate past-only columns plus `wmid`. The
+preparer derives tick-unit `return_1m` as the target history, builds
+chronological 70/15/15 bundles, and the train-only selector reduces the 100
+candidates to 20. With three deterministic time covariates, the resulting
+TimesFM input has 24 variates and remains under the hard limit of 32.
 
 Each split is stored once in session-major mmap arrays:
 

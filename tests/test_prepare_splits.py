@@ -145,6 +145,96 @@ def test_prepare_builds_audited_minute_bundle(tmp_path):
     assert (destination / "manifest.json").read_bytes() == original_manifest
 
 
+def test_prepare_derives_trailing_tick_return_from_causal_wmid_grid(tmp_path):
+    source = tmp_path / "source"
+    date_value = 20250102
+    day_dir = source / f"date={date_value}"
+    day_dir.mkdir(parents=True)
+    midnight = datetime.strptime(str(date_value), "%Y%m%d").replace(tzinfo=timezone.utc)
+    boundaries = np.asarray(
+        [int((midnight + timedelta(minutes=index)).timestamp() * 1e9) for index in range(1, 6)],
+        dtype=np.int64,
+    )
+    raw_hwts = boundaries - 1
+    tick_size = 0.015625
+    wmid = 100.0 + np.arange(5, dtype=np.float64) * tick_size
+    feature = np.arange(5, dtype=np.float32)
+    pq.write_table(
+        pa.table({"hwts": raw_hwts, "wmid": wmid, "feature": feature}),
+        day_dir / "part0.parquet",
+    )
+    dates_path = tmp_path / "dates.txt"
+    dates_path.write_text(f"{date_value}\n")
+    schema_path = tmp_path / "schema.json"
+    schema_path.write_text(
+        json.dumps(
+            {
+                "dataset_id": "derived",
+                "product": "ZN",
+                "path_template": "date={date}/*.parquet",
+                "timestamp_column": "timestamp_ns",
+                "target": {
+                    "name": "return_1m",
+                    "column": "return_1m",
+                    "unit": "ticks",
+                    "price_source": "WMid",
+                    "return_type": "tick_displacement",
+                    "timestamp_semantics": "bar_end",
+                    "availability_lag_minutes": 0,
+                    "missing_policy": "mask",
+                    "derivation": {
+                        "kind": "trailing_price_difference_ticks",
+                        "price_column": "wmid",
+                        "tick_size": tick_size,
+                        "timestamp_source_column": "hwts",
+                        "interval_minutes": 1,
+                    },
+                },
+                "session": {
+                    "timezone": "UTC",
+                    "first_bar_time": "00:02:00",
+                    "minutes": 4,
+                },
+                "past_only_features": [
+                    {
+                        "name": "feature",
+                        "column": "feature",
+                        "family": "state",
+                        "availability_lag_minutes": 0,
+                    }
+                ],
+                "past_future_features": [],
+            }
+        )
+    )
+    destination = tmp_path / "bundle"
+    prepare.build_split(
+        schema=prepare._load_schema(schema_path),
+        schema_path=schema_path,
+        source_root=str(source),
+        dates_path=dates_path,
+        split="train",
+        destination=destination,
+        overwrite=False,
+    )
+
+    np.testing.assert_array_equal(
+        np.load(destination / "timestamps.npy")[0],
+        boundaries[1:],
+    )
+    np.testing.assert_allclose(
+        np.load(destination / "target_values.npy")[0],
+        np.ones(4, dtype=np.float32),
+    )
+    assert not np.load(destination / "target_mask.npy")[0].any()
+    np.testing.assert_array_equal(
+        np.load(destination / "past_only_values.npy")[0, 0],
+        feature[1:],
+    )
+    manifest = json.loads((destination / "manifest.json").read_text())
+    assert manifest["target"]["derivation"]["kind"] == "trailing_price_difference_ticks"
+
+
 def test_split_audit_rejects_overlap(tmp_path):
     (tmp_path / "dates-train.txt").write_text("20250102\n20250103\n")
     (tmp_path / "dates-val.txt").write_text("20250103\n20250104\n")

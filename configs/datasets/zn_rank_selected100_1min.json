@@ -1,0 +1,646 @@
+{
+  "dataset_id": "zn_rank_selected100_1min_wmid_ticks_v1",
+  "past_future_features": [
+    {
+      "kind": "sin_time_of_day",
+      "name": "sin_time_of_day"
+    },
+    {
+      "kind": "cos_time_of_day",
+      "name": "cos_time_of_day"
+    },
+    {
+      "kind": "time_to_close",
+      "name": "time_to_close"
+    }
+  ],
+  "past_only_features": [
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn_imp_t5_003_down_since",
+      "family": "impulse:ActionSelector",
+      "name": "zn_imp_t5_003_down_since"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn_imp_t33_005_up_since",
+      "family": "impulse:RollingExtremeImpulse",
+      "name": "zn_imp_t33_005_up_since"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn_imp_t14_005_up_emst60s",
+      "family": "impulse:MessageFieldSelector",
+      "name": "zn_imp_t14_005_up_emst60s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn_imp_t33_005_down_last",
+      "family": "impulse:RollingExtremeImpulse",
+      "name": "zn_imp_t33_005_down_last"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn_imp_t14_005_signed_win15s",
+      "family": "impulse:MessageFieldSelector",
+      "name": "zn_imp_t14_005_signed_win15s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn_imp_t20_014_signed_win300s",
+      "family": "impulse:RollingExtremeImpulse",
+      "name": "zn_imp_t20_014_signed_win300s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn_imp_t6_027_signed_emst60s",
+      "family": "impulse:RollingExtremeImpulse",
+      "name": "zn_imp_t6_027_signed_emst60s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn_imp_t20_013_up_win60s",
+      "family": "impulse:RollingExtremeImpulse",
+      "name": "zn_imp_t20_013_up_win60s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn_imp_t6_031_signed_emst60s",
+      "family": "impulse:RollingExtremeImpulse",
+      "name": "zn_imp_t6_031_signed_emst60s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn_imp_t5_010_signed_win300s",
+      "family": "impulse:RollingExtremeImpulse",
+      "name": "zn_imp_t5_010_signed_win300s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn_drift10s_gated_lowrange30s",
+      "family": "price_momentum",
+      "name": "zn_drift10s_gated_lowrange30s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn_wmp_widthratio_30s_300s",
+      "family": "volatility",
+      "name": "zn_wmp_widthratio_30s_300s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn_wmp_widthratio_10s_120s",
+      "family": "volatility",
+      "name": "zn_wmp_widthratio_10s_120s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn_CancelSignedQueueFrac_Touch_GlobalEventN64_Imb",
+      "family": "trade_order_flow",
+      "name": "zn_CancelSignedQueueFrac_Touch_GlobalEventN64_Imb"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn_CancelBidQueueFrac_Deep_CancelBidEventN64_PerEvent",
+      "family": "trade_order_flow",
+      "name": "zn_CancelBidQueueFrac_Deep_CancelBidEventN64_PerEvent"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn_JointSignedNotional_All_GlobalEventN64_CumMin",
+      "family": "trade_order_flow",
+      "name": "zn_JointSignedNotional_All_GlobalEventN64_CumMin"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn_TradeBidNotional_Touch_TradeBidEventN128_PerEvent",
+      "family": "trade_order_flow",
+      "name": "zn_TradeBidNotional_Touch_TradeBidEventN128_PerEvent"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn__imp_t11_002__net_1s__win_15s",
+      "family": "impulse:TimeGatedAction",
+      "name": "zn__imp_t11_002__net_1s__win_15s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn__imp_t11_005__up__since_s",
+      "family": "impulse:TimeGatedAction",
+      "name": "zn__imp_t11_005__up__since_s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn__imp_t11_007__up__win_60s",
+      "family": "impulse:TimeGatedAction",
+      "name": "zn__imp_t11_007__up__win_60s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn__imp_t14_001__up__win_60s",
+      "family": "impulse:MessageFieldSelector",
+      "name": "zn__imp_t14_001__up__win_60s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn__imp_t14_001__down__win_300s",
+      "family": "impulse:MessageFieldSelector",
+      "name": "zn__imp_t14_001__down__win_300s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn__imp_t15_001__bid_signed__emsE_164",
+      "family": "impulse:QuoteMigration",
+      "name": "zn__imp_t15_001__bid_signed__emsE_164"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn__imp_t15_002__down_k5__emsT_15s",
+      "family": "impulse:QuoteMigration",
+      "name": "zn__imp_t15_002__down_k5__emsT_15s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn__imp_t15_003__down__emsT_300s",
+      "family": "impulse:QuoteMigration",
+      "name": "zn__imp_t15_003__down__emsT_300s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn__imp_t18_002__signed__win_300s",
+      "family": "impulse:ActionArith",
+      "name": "zn__imp_t18_002__signed__win_300s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn__imp_t19_001__down__win_15s",
+      "family": "impulse:ActionArith",
+      "name": "zn__imp_t19_001__down__win_15s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn__imp_t19_002__bidside__emsT_300s",
+      "family": "impulse:ActionArith",
+      "name": "zn__imp_t19_002__bidside__emsT_300s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn__imp_t1_001__up__emsE_503",
+      "family": "impulse:ActionSelector",
+      "name": "zn__imp_t1_001__up__emsE_503"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn__imp_t1_013__down__win_15s",
+      "family": "impulse:ActionSelector",
+      "name": "zn__imp_t1_013__down__win_15s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn__imp_t20_004__up__win_60s",
+      "family": "impulse:MessageFieldSelector",
+      "name": "zn__imp_t20_004__up__win_60s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn__imp_t21_001__up__emsT_60s",
+      "family": "impulse:MessageFieldSelector",
+      "name": "zn__imp_t21_001__up__emsT_60s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn__imp_t23_001__dev_short_ma__win_15s",
+      "family": "impulse:PriceAnchorDeviation",
+      "name": "zn__imp_t23_001__dev_short_ma__win_15s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn__imp_t23_001__dev_short_ma__emsT_300s",
+      "family": "impulse:PriceAnchorDeviation",
+      "name": "zn__imp_t23_001__dev_short_ma__emsT_300s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn__imp_t23_006__dev_vwap_large__win_15s",
+      "family": "impulse:PriceAnchorDeviation",
+      "name": "zn__imp_t23_006__dev_vwap_large__win_15s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn__imp_t2_005__ask_signed__win_15s",
+      "family": "impulse:ActionSelector",
+      "name": "zn__imp_t2_005__ask_signed__win_15s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn__imp_t2_006__bid_signed__last",
+      "family": "impulse:ActionSelector",
+      "name": "zn__imp_t2_006__bid_signed__last"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn__imp_t3_007__bid_signed__win_60s",
+      "family": "impulse:OETSelector",
+      "name": "zn__imp_t3_007__bid_signed__win_60s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn__imp_t4_001__signed_impact__win_60s",
+      "family": "impulse:SidedImpulseSweep",
+      "name": "zn__imp_t4_001__signed_impact__win_60s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn__imp_t6_003__bidside__emsE_41",
+      "family": "impulse:ActionArith",
+      "name": "zn__imp_t6_003__bidside__emsE_41"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn__imp_t6_004__bidside__win_60s",
+      "family": "impulse:ActionArith",
+      "name": "zn__imp_t6_004__bidside__win_60s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn__imp_t6_008__bidside__emsT_300s",
+      "family": "impulse:ActionArith",
+      "name": "zn__imp_t6_008__bidside__emsT_300s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn__imp_t6_008__askside__win_15s",
+      "family": "impulse:ActionArith",
+      "name": "zn__imp_t6_008__askside__win_15s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn__imp_t7_001__bidside__emsT_15s",
+      "family": "impulse:ActionArith",
+      "name": "zn__imp_t7_001__bidside__emsT_15s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn__imp_t7_004__askside__emsT_60s",
+      "family": "impulse:ActionArith",
+      "name": "zn__imp_t7_004__askside__emsT_60s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn__imp_t8_003__ask_cross_side_pull_qty__win_300s",
+      "family": "impulse:TransactionAgg",
+      "name": "zn__imp_t8_003__ask_cross_side_pull_qty__win_300s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn__imp_t8_003__ask_cross_side_pull_qty__emsT_15s",
+      "family": "impulse:TransactionAgg",
+      "name": "zn__imp_t8_003__ask_cross_side_pull_qty__emsT_15s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn__imp_t8_004__bid_click__emsT_15s",
+      "family": "impulse:TransactionAgg",
+      "name": "zn__imp_t8_004__bid_click__emsT_15s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn__imp_t8_004__ask_click__win_15s",
+      "family": "impulse:TransactionAgg",
+      "name": "zn__imp_t8_004__ask_click__win_15s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn__imp_t11_006__signed__emsE_7",
+      "family": "impulse:TimeGatedAction",
+      "name": "zn__imp_t11_006__signed__emsE_7"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn__imp_t11_007__signed__emsT_15s",
+      "family": "impulse:TimeGatedAction",
+      "name": "zn__imp_t11_007__signed__emsT_15s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn__imp_t11_007__signed__emsT_300s",
+      "family": "impulse:TimeGatedAction",
+      "name": "zn__imp_t11_007__signed__emsT_300s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn__imp_t11_008__signed__emsT_300s",
+      "family": "impulse:TimeGatedAction",
+      "name": "zn__imp_t11_008__signed__emsT_300s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn__imp_t11_014__signed__emsT_300s",
+      "family": "impulse:TimeGatedAction",
+      "name": "zn__imp_t11_014__signed__emsT_300s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn__imp_t11_015__signed__win_15s",
+      "family": "impulse:TimeGatedAction",
+      "name": "zn__imp_t11_015__signed__win_15s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn__imp_t11_016__signed__emsT_60s",
+      "family": "impulse:TimeGatedAction",
+      "name": "zn__imp_t11_016__signed__emsT_60s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn__imp_t14_001__signed__emsT_15s",
+      "family": "impulse:MessageFieldSelector",
+      "name": "zn__imp_t14_001__signed__emsT_15s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn__imp_t15_002__signed_k5__win_300s",
+      "family": "impulse:QuoteMigration",
+      "name": "zn__imp_t15_002__signed_k5__win_300s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn__imp_t15_003__signed__win_15s",
+      "family": "impulse:QuoteMigration",
+      "name": "zn__imp_t15_003__signed__win_15s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn__imp_t19_004__signed__emsT_60s",
+      "family": "impulse:ActionArith",
+      "name": "zn__imp_t19_004__signed__emsT_60s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn__imp_t1_007__signed__win_60s",
+      "family": "impulse:ActionSelector",
+      "name": "zn__imp_t1_007__signed__win_60s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn__imp_t1_013__signed__win_300s",
+      "family": "impulse:ActionSelector",
+      "name": "zn__imp_t1_013__signed__win_300s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn__imp_t20_001__signed__win_300s",
+      "family": "impulse:MessageFieldSelector",
+      "name": "zn__imp_t20_001__signed__win_300s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn__imp_t21_001__signed__win_15s",
+      "family": "impulse:MessageFieldSelector",
+      "name": "zn__imp_t21_001__signed__win_15s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn__imp_t3_003__signed__win_60s",
+      "family": "impulse:OETSelector",
+      "name": "zn__imp_t3_003__signed__win_60s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn__imp_t3_004__signed__win_300s",
+      "family": "impulse:OETSelector",
+      "name": "zn__imp_t3_004__signed__win_300s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn__imp_t7_007__signed__win_60s",
+      "family": "impulse:ActionArith",
+      "name": "zn__imp_t7_007__signed__win_60s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn__imp_t7_007__signed__win_300s",
+      "family": "impulse:ActionArith",
+      "name": "zn__imp_t7_007__signed__win_300s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn__imp_t1_019__signed__daaT100ms_300s",
+      "family": "impulse:DecayedActionAccum",
+      "name": "zn__imp_t1_019__signed__daaT100ms_300s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn__imp_t1_002__signed__daaT100ms_15s",
+      "family": "impulse:DecayedActionAccum",
+      "name": "zn__imp_t1_002__signed__daaT100ms_15s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn_vnmom_5s",
+      "family": "price_momentum",
+      "name": "zn_vnmom_5s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn_drift_0p5s",
+      "family": "price_momentum",
+      "name": "zn_drift_0p5s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn_volgated_ret10",
+      "family": "price_momentum",
+      "name": "zn_volgated_ret10"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn_asweep_ofi_30s",
+      "family": "trade_order_flow",
+      "name": "zn_asweep_ofi_30s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn_vwap_mid_td1s",
+      "family": "price_momentum",
+      "name": "zn_vwap_mid_td1s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn_rega_topqtypredifavg_d0p9",
+      "family": "book_liquidity",
+      "name": "zn_rega_topqtypredifavg_d0p9"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn_trend_ret_scale",
+      "family": "price_momentum",
+      "name": "zn_trend_ret_scale"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn_decay_dts2_d0p5",
+      "family": "trade_order_flow",
+      "name": "zn_decay_dts2_d0p5"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn_sdi2",
+      "family": "pivot_flip_regime",
+      "name": "zn_sdi2"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn_asweep_jpdiff_600s",
+      "family": "trade_order_flow",
+      "name": "zn_asweep_jpdiff_600s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn_sweep1_pivotdirvol_2s",
+      "family": "volatility",
+      "name": "zn_sweep1_pivotdirvol_2s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn_pivotdeltasize",
+      "family": "pivot_flip_regime",
+      "name": "zn_pivotdeltasize"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn_upside_vol",
+      "family": "volatility",
+      "name": "zn_upside_vol"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn_ta_x_f60_s300",
+      "family": "price_momentum",
+      "name": "zn_ta_x_f60_s300"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn_rega_athiglow_direction1",
+      "family": "pivot_flip_regime",
+      "name": "zn_rega_athiglow_direction1"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn_rega_flidurrat_n10",
+      "family": "engineered_state",
+      "name": "zn_rega_flidurrat_n10"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn_rega_deelogqtypre_n40",
+      "family": "book_liquidity",
+      "name": "zn_rega_deelogqtypre_n40"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn_rega_sigtopchadec_600s",
+      "family": "book_liquidity",
+      "name": "zn_rega_sigtopchadec_600s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn_rega_locbrehiglow_600s",
+      "family": "pivot_flip_regime",
+      "name": "zn_rega_locbrehiglow_600s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn_d2_pen_path_p5",
+      "family": "trade_order_flow",
+      "name": "zn_d2_pen_path_p5"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn_rega_flistaind_def",
+      "family": "pivot_flip_regime",
+      "name": "zn_rega_flistaind_def"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn_rega_deelogordpre_n20",
+      "family": "book_liquidity",
+      "name": "zn_rega_deelogordpre_n20"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn_rega_stapivqty_60s",
+      "family": "book_liquidity",
+      "name": "zn_rega_stapivqty_60s"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn_rega_lpsig_direction0",
+      "family": "pivot_flip_regime",
+      "name": "zn_rega_lpsig_direction0"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn_rega_h005_d0p99",
+      "family": "pivot_flip_regime",
+      "name": "zn_rega_h005_d0p99"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn_rega_tpsig_direction0",
+      "family": "pivot_flip_regime",
+      "name": "zn_rega_tpsig_direction0"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn_deep_kyletv_s300_d95_lam",
+      "family": "engineered_state",
+      "name": "zn_deep_kyletv_s300_d95_lam"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn_deep_fsm_meanq",
+      "family": "book_liquidity",
+      "name": "zn_deep_fsm_meanq"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn_rega_deemedlevqty_n40",
+      "family": "book_liquidity",
+      "name": "zn_rega_deemedlevqty_n40"
+    },
+    {
+      "availability_lag_minutes": 0,
+      "column": "zn_rega_vwadifmid_60s",
+      "family": "price_momentum",
+      "name": "zn_rega_vwadifmid_60s"
+    }
+  ],
+  "path_template": "date={date}/*.parquet",
+  "product": "ZN",
+  "session": {
+    "first_bar_time": "09:31:00",
+    "minutes": 390,
+    "timezone": "America/New_York"
+  },
+  "source_manifest": "/home/shuaibin.li/projects/timesfm_ft/datas/wenyao_features/zn_rank_selected100_1min_manifest.json",
+  "source_manifest_sha256": "6ebba2d43ac20f36f3365418101e8d35a4ea469e4b4542800f16de867f9835a0",
+  "target": {
+    "availability_lag_minutes": 0,
+    "column": "return_1m",
+    "derivation": {
+      "interval_minutes": 1,
+      "kind": "trailing_price_difference_ticks",
+      "price_column": "wmid",
+      "tick_size": 0.015625,
+      "timestamp_source_column": "hwts"
+    },
+    "missing_policy": "mask",
+    "name": "return_1m",
+    "price_source": "WMid",
+    "return_type": "tick_displacement",
+    "timestamp_semantics": "bar_end",
+    "unit": "ZN_ticks"
+  },
+  "timestamp_column": "timestamp_ns"
+}
