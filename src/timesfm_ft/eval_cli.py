@@ -34,6 +34,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Metric output directory. Defaults to trainer.output_dir/evaluation.",
     )
     parser.add_argument("--batch-size", type=int)
+    parser.add_argument(
+        "--horizon",
+        type=int,
+        help="Evaluation horizon override, bounded by the training config horizon.",
+    )
     parser.add_argument("--device", help="Override trainer.device.")
     parser.add_argument(
         "--log-level",
@@ -59,6 +64,7 @@ def main() -> None:
         batch_size=args.batch_size,
         device_name=args.device,
         split=args.split,
+        horizon_length=args.horizon,
     )
     logging.getLogger(__name__).info("artifacts=%s", destination)
 

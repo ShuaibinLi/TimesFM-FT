@@ -40,6 +40,7 @@ def test_builds_one_unique_lead_one_point_per_target_minute(tmp_path):
     summary = daily.build_daily_vectors(source, output_dir=output)
     assert summary["points"] == 5
     assert summary["overall_ic"] == 1.0
+    assert summary["direction_accuracy"] == 1.0
     payload = np.load(output / "daily_vectors.npz")
     np.testing.assert_array_equal(payload["lengths"], np.asarray([3, 2]))
     assert payload["predictions"].shape == (2, 3)

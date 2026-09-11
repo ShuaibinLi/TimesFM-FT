@@ -11,7 +11,7 @@ from typing import Literal
 import numpy as np
 
 from timesfm_ft.adapter import TimesFM3Adapter
-from timesfm_ft.config import ExperimentConfig
+from timesfm_ft.config import EvaluationConfig, ExperimentConfig
 from timesfm_ft.metrics import ForecastMetricsAccumulator
 from timesfm_ft.trainer import _dataset, _make_loader, _move_batch, resolve_device
 
@@ -36,6 +36,7 @@ def evaluate_experiment(
     batch_size: int | None = None,
     device_name: str | None = None,
     split: Literal["val", "test"] | None = None,
+    horizon_length: int | None = None,
 ) -> Path:
     """Evaluates a chronological validation/test bundle and writes all reports."""
 
@@ -68,11 +69,28 @@ def evaluate_experiment(
         else:
             selected_path = Path(config.data.val_path)
             dates_path = config.data.val_dates_path
+    evaluation_horizon = horizon_length or config.data.horizon_length
+    if not 1 <= evaluation_horizon <= config.data.horizon_length:
+        raise ValueError(
+            f"evaluation horizon must be within 1..{config.data.horizon_length}"
+        )
     dataset = _dataset(
         config,
         path=str(selected_path),
         split=selected_split,
         dates_path=dates_path,
+        horizon_length=evaluation_horizon,
+    )
+    report_horizons = tuple(
+        horizon for horizon in config.evaluation.report_horizons if horizon <= evaluation_horizon
+    )
+    if not report_horizons:
+        report_horizons = (evaluation_horizon,)
+    effective_evaluation = EvaluationConfig(
+        report_horizons=report_horizons,
+        trading_horizon=min(config.evaluation.trading_horizon, evaluation_horizon),
+        cost_per_turnover=config.evaluation.cost_per_turnover,
+        save_predictions=config.evaluation.save_predictions,
     )
     device = resolve_device(device_name or config.trainer.device)
     model = TimesFM3Adapter.from_pretrained(
@@ -105,11 +123,11 @@ def evaluate_experiment(
         generator=None,
     )
     accumulator = ForecastMetricsAccumulator(
-        horizon=config.data.horizon_length,
+        horizon=evaluation_horizon,
         quantiles=model.quantiles,
-        report_horizons=config.evaluation.report_horizons,
-        trading_horizon=config.evaluation.trading_horizon,
-        cost_per_turnover=config.evaluation.cost_per_turnover,
+        report_horizons=effective_evaluation.report_horizons,
+        trading_horizon=effective_evaluation.trading_horizon,
+        cost_per_turnover=effective_evaluation.cost_per_turnover,
     )
     LOGGER.info(
         "eval_start checkpoint=%s adapter=%s split=%s samples=%d variates=%d "
@@ -121,13 +139,13 @@ def evaluate_experiment(
         dataset.num_variates,
         config.data.context_min,
         config.data.context_max,
-        config.data.horizon_length,
+        evaluation_horizon,
     )
     for step, raw_batch in enumerate(loader, start=1):
         batch = _move_batch(raw_batch, device)
         predictions = model.predict(
             batch["context_values"],
-            horizon=config.data.horizon_length,
+            horizon=evaluation_horizon,
             context_mask=batch["context_mask"],
             context_padding_mask=batch["context_padding_mask"],
             past_future_values=batch["past_future_values"],
@@ -155,6 +173,7 @@ def evaluate_experiment(
             "dataset_id": config.data.dataset_id,
             "target_name": config.data.target_name,
             "target_unit": config.data.target_unit,
+            "evaluation_horizon": evaluation_horizon,
             "past_only_features": config.data.past_only_features,
             "past_future_features": config.data.past_future_features,
         }
@@ -168,18 +187,18 @@ def evaluate_experiment(
     _write_rows(destination / "per_lead.csv", lead_rows)
     _write_rows(destination / "cumulative_horizons.csv", cumulative_rows)
     _write_rows(destination / "slices.csv", slice_rows)
-    if config.evaluation.save_predictions:
+    if effective_evaluation.save_predictions:
         np.savez(
             destination / "predictions.npz",
             **accumulator.prediction_arrays(),
         )
 
     cumulative_lookup = {row["horizon_minutes"]: row for row in cumulative_rows}
-    trading_row = cumulative_lookup.get(config.evaluation.trading_horizon, {})
+    trading_row = cumulative_lookup.get(effective_evaluation.trading_horizon, {})
     LOGGER.info(
         "eval_end pinball=%s rank_ic_%dm=%s net_utility=%s artifacts=%s",
         (f"{summary['mean_pinball']:.6f}" if summary["mean_pinball"] is not None else "null"),
-        config.evaluation.trading_horizon,
+        effective_evaluation.trading_horizon,
         (f"{trading_row['rank_ic']:.6f}" if trading_row.get("rank_ic") is not None else "null"),
         (
             f"{summary['trading_proxy']['net_mean']:.6f}"

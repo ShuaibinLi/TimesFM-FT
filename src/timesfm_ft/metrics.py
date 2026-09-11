@@ -90,6 +90,85 @@ def _prediction_deciles(
     return means, monotonicity, spread
 
 
+def binary_direction_metrics(
+    prediction: np.ndarray,
+    target: np.ndarray,
+) -> dict[str, float | int | None]:
+    """Evaluate P50 signs against non-zero weighted-mid-price changes."""
+
+    prediction = np.asarray(prediction, dtype=np.float64)
+    target = np.asarray(target, dtype=np.float64)
+    valid = np.isfinite(prediction) & np.isfinite(target) & (target != 0.0)
+    prediction = prediction[valid]
+    target = target[valid]
+    true_up = target > 0.0
+    predicted_up = prediction > 0.0
+    predicted_down = prediction < 0.0
+    predicted_flat = prediction == 0.0
+    up_up = int(np.sum(true_up & predicted_up))
+    up_down = int(np.sum(true_up & predicted_down))
+    up_flat = int(np.sum(true_up & predicted_flat))
+    down_up = int(np.sum(~true_up & predicted_up))
+    down_down = int(np.sum(~true_up & predicted_down))
+    down_flat = int(np.sum(~true_up & predicted_flat))
+    up_count = int(true_up.sum())
+    down_count = int((~true_up).sum())
+    active_count = int((~predicted_flat).sum())
+    correct = up_up + down_down
+    up_precision = _safe_ratio(up_up, up_up + down_up)
+    up_recall = _safe_ratio(up_up, up_count)
+    down_precision = _safe_ratio(down_down, down_down + up_down)
+    down_recall = _safe_ratio(down_down, down_count)
+
+    def f1(precision: float | None, recall: float | None) -> float | None:
+        if precision is None or recall is None or precision + recall == 0:
+            return None
+        return 2.0 * precision * recall / (precision + recall)
+
+    auc: float | None = None
+    if up_count and down_count:
+        ranks = _rank(prediction)
+        positive_rank_sum = float(ranks[true_up].sum())
+        auc = (
+            positive_rank_sum - up_count * (up_count - 1) / 2
+        ) / (up_count * down_count)
+    return {
+        "direction_nonzero_points": int(len(target)),
+        "direction_up_points": up_count,
+        "direction_down_points": down_count,
+        "direction_predicted_flat_points": int(predicted_flat.sum()),
+        "direction_up_rate": _safe_ratio(up_count, len(target)),
+        "direction_predicted_up_rate": _safe_ratio(int(predicted_up.sum()), active_count),
+        "direction_accuracy": _safe_ratio(correct, len(target)),
+        "direction_active_accuracy": _safe_ratio(correct, active_count),
+        "direction_balanced_accuracy": (
+            0.5 * (up_recall + down_recall)
+            if up_recall is not None and down_recall is not None
+            else None
+        ),
+        "direction_up_precision": up_precision,
+        "direction_up_accuracy": up_recall,
+        "direction_up_recall": up_recall,
+        "direction_up_f1": f1(up_precision, up_recall),
+        "direction_down_precision": down_precision,
+        "direction_down_accuracy": down_recall,
+        "direction_down_recall": down_recall,
+        "direction_down_f1": f1(down_precision, down_recall),
+        "direction_roc_auc": auc,
+        "direction_realized_signed_delta_mean": (
+            float(np.mean(np.sign(prediction[~predicted_flat]) * target[~predicted_flat]))
+            if active_count
+            else None
+        ),
+        "direction_confusion_up_up": up_up,
+        "direction_confusion_up_down": up_down,
+        "direction_confusion_up_flat": up_flat,
+        "direction_confusion_down_up": down_up,
+        "direction_confusion_down_down": down_down,
+        "direction_confusion_down_flat": down_flat,
+    }
+
+
 class ForecastMetricsAccumulator:
     """Accumulates multi-horizon metrics without mixing intraday sessions."""
 
@@ -281,6 +360,7 @@ class ForecastMetricsAccumulator:
             "q10_q90_coverage": _safe_ratio(int(interval_covered.sum()), total_count),
             "mean_q10_q90_width": _safe_ratio(float(interval_width.sum()), total_count),
         }
+        summary.update(binary_direction_metrics(median[valid], targets[valid]))
 
         lead_rows: list[dict[str, Any]] = []
         for index in range(self.horizon):
@@ -324,6 +404,7 @@ class ForecastMetricsAccumulator:
                 row[f"coverage_q{int(round(quantile * 100)):02d}"] = _safe_ratio(
                     int(self.coverage_count[index, q_index]), count
                 )
+            row.update(binary_direction_metrics(prediction, target))
             lead_rows.append(row)
 
         cumulative_rows = [
@@ -361,7 +442,7 @@ class ForecastMetricsAccumulator:
         long_mean = float(targets[long].mean()) if long.any() else None
         short_mean = float(targets[short].mean()) if short.any() else None
         decile_means, decile_monotonicity, decile_spread = _prediction_deciles(medians, targets)
-        return {
+        row = {
             "horizon_minutes": horizon,
             "samples": int(len(targets)),
             "masked_path_excluded": masked_path_excluded,
@@ -389,6 +470,8 @@ class ForecastMetricsAccumulator:
             "prediction_decile_monotonicity": decile_monotonicity,
             "prediction_decile_spread": decile_spread,
         }
+        row.update(binary_direction_metrics(medians, targets))
+        return row
 
     def _trading_proxy(self, arrays: dict[str, np.ndarray]) -> dict[str, Any]:
         horizon = self.trading_horizon

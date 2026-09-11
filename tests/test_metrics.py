@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from timesfm_ft.metrics import ForecastMetricsAccumulator
+from timesfm_ft.metrics import ForecastMetricsAccumulator, binary_direction_metrics
 
 
 def _metadata(samples: int):
@@ -113,3 +113,18 @@ def test_prediction_decile_monotonicity_is_reported():
     _, _, cumulative, _ = accumulator.results()
     assert cumulative[0]["prediction_decile_monotonicity"] == pytest.approx(1.0)
     assert cumulative[0]["prediction_decile_spread"] > 0
+
+
+def test_binary_direction_metrics_exclude_flat_targets_and_report_auc():
+    metrics = binary_direction_metrics(
+        prediction=torch.tensor([2.0, 1.0, -1.0, -2.0, 4.0]).numpy(),
+        target=torch.tensor([1.0, -1.0, 1.0, -1.0, 0.0]).numpy(),
+    )
+    assert metrics["direction_nonzero_points"] == 4
+    assert metrics["direction_accuracy"] == pytest.approx(0.5)
+    assert metrics["direction_balanced_accuracy"] == pytest.approx(0.5)
+    assert metrics["direction_up_precision"] == pytest.approx(0.5)
+    assert metrics["direction_up_accuracy"] == pytest.approx(0.5)
+    assert metrics["direction_down_precision"] == pytest.approx(0.5)
+    assert metrics["direction_down_accuracy"] == pytest.approx(0.5)
+    assert metrics["direction_roc_auc"] == pytest.approx(0.75)

@@ -1,0 +1,8 @@
+{
+  "extends": "../../outputs/zn-rank-3x3/runtime-configs/e1-lora-p3-loss-pilot.json",
+  "trainer": {
+    "batch_size": 64,
+    "gradient_accumulation_steps": 1,
+    "output_dir": "../../outputs/zn-rank-batch-ablation/e1-p3-lora-b64"
+  }
+}

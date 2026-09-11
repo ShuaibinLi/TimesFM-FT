@@ -101,3 +101,22 @@ def test_evaluator_refuses_training_data(monkeypatch, bundle_factory, tmp_path):
     )
     with pytest.raises(ValueError, match="train_path"):
         evaluate_experiment(config, data_path=config.data.train_path)
+
+
+def test_evaluator_supports_shorter_horizon_override(monkeypatch, bundle_factory, tmp_path):
+    config = _config(bundle_factory, tmp_path)
+    monkeypatch.setattr(
+        "timesfm_ft.evaluator.TimesFM3Adapter.from_pretrained",
+        lambda *args, **kwargs: _Model(),
+    )
+    destination = evaluate_experiment(
+        config,
+        split="val",
+        horizon_length=1,
+        output_dir=tmp_path / "evaluation-val-h1",
+    )
+    summary = json.loads((destination / "summary.json").read_text())
+    assert summary["evaluated_split"] == "val"
+    assert summary["evaluation_horizon"] == 1
+    assert summary["samples"] > 12
+    assert len((destination / "per_lead.csv").read_text().splitlines()) == 2

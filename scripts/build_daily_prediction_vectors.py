@@ -11,7 +11,7 @@ from typing import Any
 
 import numpy as np
 
-from timesfm_ft.metrics import _pearson, _rank_ic
+from timesfm_ft.metrics import _pearson, _rank_ic, binary_direction_metrics
 
 MINUTE_NS = 60_000_000_000
 
@@ -311,6 +311,7 @@ def build_daily_vectors(
         ),
         "daily": daily_rows,
     }
+    summary.update(binary_direction_metrics(point_prediction, point_target))
     (output_dir / "summary.json").write_text(
         json.dumps(summary, indent=2, sort_keys=True, allow_nan=False) + "\n",
         encoding="utf-8",
