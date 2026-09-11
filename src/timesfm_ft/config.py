@@ -59,8 +59,11 @@ class AdapterConfig:
 
 @dataclasses.dataclass(frozen=True)
 class ObjectiveConfig:
-    name: Literal["f0_final", "f0_all", "f1", "f1_mv"] = "f0_final"
+    name: Literal["f0_final", "f0_lead1", "f0_all", "f1", "f1_mv"] = "f0_final"
     return_pinball_weight: float = 1.0
+    lead1_pinball_weight: float = 0.0
+    correlation_weight: float = 0.0
+    correlation_eps: float = 1e-6
     cumulative_huber_weight: float = 0.0
     cumulative_horizons: tuple[int, ...] = ()
     cumulative_scale_method: Literal["mad", "std"] = "mad"
@@ -271,7 +274,7 @@ class ExperimentConfig:
                 raise ValueError("test_dates_path is required with test_path")
 
         objective = self.objective
-        if objective.name not in {"f0_final", "f0_all", "f1", "f1_mv"}:
+        if objective.name not in {"f0_final", "f0_lead1", "f0_all", "f1", "f1_mv"}:
             raise ValueError(f"unsupported objective name={objective.name!r}")
         if objective.cumulative_scale_method not in {"mad", "std"}:
             raise ValueError("unsupported cumulative_scale_method")
@@ -289,6 +292,8 @@ class ExperimentConfig:
             raise ValueError("cumulative_horizons cannot exceed horizon_length")
         weights = (
             objective.return_pinball_weight,
+            objective.lead1_pinball_weight,
+            objective.correlation_weight,
             objective.cumulative_huber_weight,
             objective.auxiliary_weight,
         )
@@ -296,6 +301,8 @@ class ExperimentConfig:
             raise ValueError("objective weights must be finite and non-negative")
         if objective.return_pinball_weight <= 0:
             raise ValueError("return_pinball_weight must be positive")
+        if not math.isfinite(objective.correlation_eps) or objective.correlation_eps <= 0:
+            raise ValueError("correlation_eps must be positive")
         if objective.cumulative_huber_weight > 0 and not objective.cumulative_horizons:
             raise ValueError("positive cumulative_huber_weight requires cumulative_horizons")
         if (
@@ -312,12 +319,24 @@ class ExperimentConfig:
                 f"{sorted(missing_auxiliary)}"
             )
         if objective.name in {"f0_final", "f0_all"} and (
-            objective.cumulative_huber_weight != 0
+            objective.lead1_pinball_weight != 0
+            or objective.correlation_weight != 0
+            or objective.cumulative_huber_weight != 0
             or objective.cumulative_horizons
             or objective.auxiliary_weight != 0
             or objective.auxiliary_features
         ):
             raise ValueError("F0-final/F0-all must use return Pinball only")
+        if objective.name == "f0_lead1" and (
+            objective.lead1_pinball_weight <= 0
+            or objective.auxiliary_weight != 0
+            or objective.auxiliary_features
+            or (objective.cumulative_huber_weight > 0 and objective.cumulative_horizons != (1,))
+            or (objective.cumulative_huber_weight == 0 and bool(objective.cumulative_horizons))
+        ):
+            raise ValueError(
+                "F0-lead1 requires lead1 Pinball, optional horizon-1 Huber, and no auxiliary loss"
+            )
         if objective.name == "f1" and (
             objective.cumulative_huber_weight <= 0
             or objective.auxiliary_weight != 0

@@ -322,6 +322,8 @@ def _run_epoch(
         name: torch.zeros((), device=device, dtype=torch.float64)
         for name in (
             "return_pinball",
+            "lead1_pinball",
+            "correlation",
             "cumulative_huber",
             "auxiliary_pinball",
         )
@@ -514,11 +516,15 @@ def _run_epoch(
 
             component_values = {
                 "return_pinball": losses.return_pinball,
+                "lead1_pinball": losses.lead1_pinball,
+                "correlation": losses.correlation,
                 "cumulative_huber": losses.cumulative_huber,
                 "auxiliary_pinball": losses.auxiliary_pinball,
             }
             batch_counts = {
                 "return_pinball": losses.return_count,
+                "lead1_pinball": losses.lead1_count,
+                "correlation": losses.correlation_count,
                 "cumulative_huber": losses.cumulative_count,
                 "auxiliary_pinball": losses.auxiliary_count,
             }
@@ -534,6 +540,8 @@ def _run_epoch(
                 }
                 running_total = (
                     loss_fn.objective.return_pinball_weight * running["return_pinball"]
+                    + loss_fn.objective.lead1_pinball_weight * running["lead1_pinball"]
+                    + loss_fn.objective.correlation_weight * running["correlation"]
                     + loss_fn.objective.cumulative_huber_weight * running["cumulative_huber"]
                     + loss_fn.objective.auxiliary_weight * running["auxiliary_pinball"]
                 )
@@ -543,7 +551,8 @@ def _run_epoch(
                 LOGGER.info(
                     "%s epoch=%d step=%d/%d batch_loss=%.6f "
                     "recent_loss=%.6f running_loss=%.6f "
-                    "return_pinball=%.6f cumulative_huber=%.6f "
+                    "return_pinball=%.6f lead1_pinball=%.6f correlation=%.6f "
+                    "cumulative_huber=%.6f "
                     "auxiliary_pinball=%.6f context_width=%d gradient_norm=%s %s",
                     split,
                     epoch,
@@ -553,6 +562,8 @@ def _run_epoch(
                     recent_loss_sum / max(recent_sample_count, 1),
                     running_total,
                     running["return_pinball"],
+                    running["lead1_pinball"],
+                    running["correlation"],
                     running["cumulative_huber"],
                     running["auxiliary_pinball"],
                     batch["context_values"].shape[-1],
@@ -573,12 +584,16 @@ def _run_epoch(
     }
     total_loss = (
         loss_fn.objective.return_pinball_weight * components["return_pinball"]
+        + loss_fn.objective.lead1_pinball_weight * components["lead1_pinball"]
+        + loss_fn.objective.correlation_weight * components["correlation"]
         + loss_fn.objective.cumulative_huber_weight * components["cumulative_huber"]
         + loss_fn.objective.auxiliary_weight * components["auxiliary_pinball"]
     )
     metrics: dict[str, Any] = {
         "loss": total_loss,
         "return_pinball": components["return_pinball"],
+        "lead1_pinball": components["lead1_pinball"],
+        "correlation": components["correlation"],
         "cumulative_huber": components["cumulative_huber"],
         "auxiliary_pinball": components["auxiliary_pinball"],
         "mean_pinball": components["return_pinball"],
@@ -694,16 +709,35 @@ def _load_training_state(
         "data",
         "model",
         "adapter",
-        "objective",
         "optimizer",
         "scheduler",
         "evaluation",
     ):
         if saved_config.get(section) != current_config.get(section):
             raise ValueError(f"resume config mismatch in section {section}")
+    saved_objective = dict(saved_config.get("objective", {}))
+    for key, value in {
+        "lead1_pinball_weight": 0.0,
+        "correlation_weight": 0.0,
+        "correlation_eps": 1e-6,
+    }.items():
+        saved_objective.setdefault(key, value)
+    if saved_objective != current_config.get("objective"):
+        raise ValueError("resume config mismatch in section objective")
     saved_trainer = dict(saved_config.get("trainer", {}))
     current_trainer = dict(current_config.get("trainer", {}))
-    for key in ("resume_from", "log_every_steps"):
+    saved_epochs = int(saved_trainer.get("epochs", 0))
+    current_epochs = int(current_trainer.get("epochs", 0))
+    completed_epoch = int(state["epoch"])
+    if current_epochs < max(saved_epochs, completed_epoch):
+        raise ValueError("resume epochs cannot move backwards")
+    for key in (
+        "resume_from",
+        "log_every_steps",
+        "epochs",
+        "output_dir",
+        "early_stopping_patience",
+    ):
         saved_trainer.pop(key, None)
         current_trainer.pop(key, None)
     if saved_trainer != current_trainer:
@@ -715,6 +749,17 @@ def _load_training_state(
     model.load_trainable_state_dict(state["adapter"])
     optimizer.load_state_dict(state["optimizer"])
     scheduler.load_state_dict(state["scheduler"])
+    aligned_lrs = [
+        base_lr * schedule(scheduler.last_epoch)
+        for base_lr, schedule in zip(
+            scheduler.base_lrs,
+            scheduler.lr_lambdas,
+            strict=True,
+        )
+    ]
+    for group, learning_rate in zip(optimizer.param_groups, aligned_lrs, strict=True):
+        group["lr"] = learning_rate
+    scheduler._last_lr = aligned_lrs
     _restore_rng_state(state["rng"], generator)
     return (
         int(state["epoch"]) + 1,
@@ -895,7 +940,8 @@ def train_experiment(config: ExperimentConfig) -> Path:
         "run_start checkpoint=%s adapter=%s device=%s dtype=%s "
         "train_samples=%d val_samples=%d variates=%d context=%d..%d horizon=%d "
         "batch=%d effective_batch=%d objective=%s "
-        "return_weight=%.3f cumulative_weight=%.3f auxiliary_weight=%.3f "
+        "return_weight=%.3f lead1_weight=%.3f correlation_weight=%.3f "
+        "cumulative_weight=%.3f auxiliary_weight=%.3f "
         "trainable=%d total=%d",
         config.model.checkpoint,
         config.adapter.type,
@@ -911,6 +957,8 @@ def train_experiment(config: ExperimentConfig) -> Path:
         config.trainer.batch_size * config.trainer.gradient_accumulation_steps,
         config.objective.name,
         config.objective.return_pinball_weight,
+        config.objective.lead1_pinball_weight,
+        config.objective.correlation_weight,
         config.objective.cumulative_huber_weight,
         config.objective.auxiliary_weight,
         summary["trainable"],
@@ -1171,6 +1219,8 @@ def train_experiment(config: ExperimentConfig) -> Path:
         validation_scorecard = {
             "loss": checkpoint_val_metrics["loss"],
             "return_pinball": checkpoint_val_metrics["return_pinball"],
+            "lead1_pinball": checkpoint_val_metrics["lead1_pinball"],
+            "correlation": checkpoint_val_metrics["correlation"],
             "cumulative_huber": checkpoint_val_metrics["cumulative_huber"],
             "auxiliary_pinball": checkpoint_val_metrics["auxiliary_pinball"],
             "cumulative_horizons": checkpoint_val_metrics["cumulative_horizons"],

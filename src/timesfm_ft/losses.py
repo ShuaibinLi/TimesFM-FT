@@ -115,9 +115,13 @@ class LossScaleState:
 class LossOutput:
     total: torch.Tensor
     return_pinball: torch.Tensor
+    lead1_pinball: torch.Tensor
+    correlation: torch.Tensor
     cumulative_huber: torch.Tensor
     auxiliary_pinball: torch.Tensor
     return_count: int
+    lead1_count: int
+    correlation_count: int
     cumulative_count: int
     auxiliary_count: int
 
@@ -212,6 +216,25 @@ class BusinessForecastLoss(nn.Module):
         values = torch.maximum(quantiles * error, (quantiles - 1.0) * error)
         return _masked_mean_or_zero(values, prediction_valid)
 
+    def _correlation_loss(
+        self,
+        prediction: torch.Tensor,
+        target: torch.Tensor,
+        valid: torch.Tensor,
+    ) -> torch.Tensor:
+        if int(valid.sum().item()) < 2:
+            return _zero(prediction)
+        prediction_values = prediction[valid]
+        target_values = target[valid]
+        prediction_centered = prediction_values - prediction_values.mean()
+        target_centered = target_values - target_values.mean()
+        denominator = torch.sqrt(
+            prediction_centered.square().sum() * target_centered.square().sum()
+            + self.objective.correlation_eps
+        )
+        correlation = (prediction_centered * target_centered).sum() / denominator
+        return 1.0 - correlation
+
     def forward(
         self,
         predictions: torch.Tensor,
@@ -244,6 +267,29 @@ class BusinessForecastLoss(nn.Module):
         targets = targets.float()
         return_pinball = self._pinball(predictions, targets, valid_target)
         return_count = int(valid_target.sum().item()) * self.quantile_count
+
+        lead1_pinball = _zero(predictions)
+        lead1_count = 0
+        correlation = _zero(predictions)
+        correlation_count = 0
+        if self.objective.lead1_pinball_weight > 0 or self.objective.correlation_weight > 0:
+            if predictions.ndim != 3:
+                raise ValueError("lead1 objectives require final-anchor predictions")
+            lead1_valid = valid_target[:, 0]
+            if lead1_valid.any().item():
+                lead1_pinball = self._pinball(
+                    predictions[:, 0],
+                    targets[:, 0],
+                    lead1_valid,
+                )
+                lead1_count = int(lead1_valid.sum().item()) * self.quantile_count
+                if self.objective.correlation_weight > 0:
+                    correlation = self._correlation_loss(
+                        predictions[:, 0, self.median_index],
+                        targets[:, 0],
+                        lead1_valid,
+                    )
+                    correlation_count = int(lead1_valid.sum().item())
 
         cumulative_huber = _zero(predictions)
         cumulative_count = 0
@@ -342,15 +388,21 @@ class BusinessForecastLoss(nn.Module):
 
         total = (
             self.objective.return_pinball_weight * return_pinball
+            + self.objective.lead1_pinball_weight * lead1_pinball
+            + self.objective.correlation_weight * correlation
             + self.objective.cumulative_huber_weight * cumulative_huber
             + self.objective.auxiliary_weight * auxiliary_pinball
         )
         return LossOutput(
             total=total,
             return_pinball=return_pinball,
+            lead1_pinball=lead1_pinball,
+            correlation=correlation,
             cumulative_huber=cumulative_huber,
             auxiliary_pinball=auxiliary_pinball,
             return_count=return_count,
+            lead1_count=lead1_count,
+            correlation_count=correlation_count,
             cumulative_count=cumulative_count,
             auxiliary_count=auxiliary_count,
         )

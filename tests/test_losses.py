@@ -62,6 +62,37 @@ def test_f0_final_is_target_pinball_only_and_respects_masks():
     assert result.auxiliary_count == 0
 
 
+def test_f0_lead1_combines_pinball_huber_and_correlation_terms():
+    objective = ObjectiveConfig(
+        name="f0_lead1",
+        lead1_pinball_weight=1.0,
+        correlation_weight=0.05,
+        cumulative_huber_weight=0.5,
+        cumulative_horizons=(1,),
+    )
+    loss = _loss(objective, cumulative={1: 1.0})
+    targets = torch.tensor([[-1.0, 0.0], [0.0, 0.0], [1.0, 0.0]])
+    predictions = torch.zeros(3, 2, 3)
+    predictions[:, 0, 1] = torch.tensor([1.0, 0.0, -1.0])
+    result = loss(
+        predictions,
+        targets,
+        target_mask=torch.zeros_like(targets, dtype=torch.bool),
+    )
+    assert result.lead1_count == 9
+    assert result.correlation_count == 3
+    assert float(result.correlation) == pytest.approx(2.0, abs=1e-6)
+    torch.testing.assert_close(
+        result.total,
+        (
+            result.return_pinball
+            + result.lead1_pinball
+            + 0.05 * result.correlation
+            + 0.5 * result.cumulative_huber
+        ),
+    )
+
+
 def test_f0_all_pinball_uses_only_eligible_dense_anchors():
     objective = ObjectiveConfig(name="f0_all")
     loss = _loss(objective)

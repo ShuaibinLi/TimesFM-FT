@@ -185,16 +185,19 @@ Run/reproduce the full-test zero-shot matrix:
 scripts/run_zero_shot_matrix_nohup.sh
 ```
 
-Run the matched one-epoch training gates:
+Run the complete experiment pipeline:
 
 ```bash
-scripts/run_train_nohup.sh configs/experiments/zn_rank_e2_pilot.json
-scripts/run_train_nohup.sh configs/experiments/zn_rank_e2_lora_pilot.json
+scripts/run_3x3_pilot_and_winners_nohup.sh
 ```
 
-`scripts/run_e2_pilot_matrix_nohup.sh` runs head → LoRA → full sequentially.
-When head/LoRA are already in progress, use
-`scripts/run_e2_full_after_matrix_nohup.sh` to queue full tuning behind them.
+The orchestrator assigns one complete input series per machine: E1 on spark6,
+E0 on spark4 after its current work, and E2 selection/resume on spark5.
+Each E first compares head/LoRA/full for one epoch. E1 then fixes its tuning
+winner and compares P0 all-lead Pinball, P1 extra lead1 Pinball, P2 horizon-1
+Huber, and P3 mini-batch correlation loss. Each E resumes its selected epoch-1
+`last/training_state.pt` to a total of three epochs.
+
 The full route uses micro-batch 4 × accumulation 16 to preserve effective
 batch 64 without assuming full-backbone activations fit at micro-batch 32.
 Remote trial allow/deny state is frozen in `configs/remote_workers.json`;
@@ -203,13 +206,6 @@ All pilots run full rolling-one-step validation and save a non-resumable
 adapter snapshot every 500 optimizer updates under
 `step-checkpoints/epoch-*/`; epoch-end `last/` and `best/` additionally contain
 the complete resumable optimizer/scheduler/RNG state.
-
-Only after a pilot improves validation rolling one-step overall IC should a complete
-five-epoch config be launched:
-
-```bash
-scripts/run_train_nohup.sh configs/experiments/zn_rank_e2_selected20_tod.json
-```
 
 The active objective is F0-final Pinball in ZN tick units. Checkpoints are
 selected by the pooled validation IC of the non-overlapping rolling one-step

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -393,6 +394,8 @@ def _epoch_metrics(*args, split, epoch, **kwargs):
         "loss": value,
         "mean_pinball": value,
         "return_pinball": value,
+        "lead1_pinball": 0.0,
+        "correlation": 0.0,
         "cumulative_huber": 0.0,
         "auxiliary_pinball": 0.0,
         "rmse": value,
@@ -446,3 +449,35 @@ def test_training_writes_versioned_resumable_state(monkeypatch, bundle_factory, 
     assert (output / "best/adapter.pt").exists()
     adapter_metadata = json.loads((output / "best/adapter_config.json").read_text())
     assert adapter_metadata["training_graph"] == "deployment_suffix_decode"
+
+
+def test_resume_can_extend_total_epochs_and_change_output_dir(
+    monkeypatch,
+    bundle_factory,
+    tmp_path,
+):
+    monkeypatch.setattr(
+        trainer.TimesFM3Adapter,
+        "from_pretrained",
+        lambda *args, **kwargs: _CheckpointModel(),
+    )
+    monkeypatch.setattr(trainer, "_run_epoch", _epoch_metrics)
+    pilot = _experiment(bundle_factory, tmp_path)
+    pilot_output = trainer.train_experiment(pilot)
+    state_path = pilot_output / "last/training_state.pt"
+    state = torch.load(state_path, map_location="cpu", weights_only=False)
+    for key in ("lead1_pinball_weight", "correlation_weight", "correlation_eps"):
+        state["config"]["objective"].pop(key)
+    torch.save(state, state_path)
+    extended = dataclasses.replace(
+        pilot,
+        trainer=dataclasses.replace(
+            pilot.trainer,
+            output_dir=str(tmp_path / "extended"),
+            epochs=4,
+            resume_from=str(state_path),
+        ),
+    )
+    output = trainer.train_experiment(extended)
+    history = [json.loads(line) for line in (output / "history.jsonl").read_text().splitlines()]
+    assert [row["epoch"] for row in history] == [1, 2, 3]

@@ -220,6 +220,8 @@ def main() -> None:
                 "prediction_shape": list(prediction.shape),
                 "loss": float(loss.total.detach()),
                 "return_pinball": float(loss.return_pinball.detach()),
+                "lead1_pinball": float(loss.lead1_pinball.detach()),
+                "correlation": float(loss.correlation.detach()),
                 "cumulative_huber": float(loss.cumulative_huber.detach()),
                 "auxiliary_pinball": float(loss.auxiliary_pinball.detach()),
                 "loss_scale_fingerprint": loss_scales.fingerprint,
